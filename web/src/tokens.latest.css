@@ -1,0 +1,132 @@
+/*
+ * Vendored from 4242labs/design-system tokens.latest.css v0.5.0 (commit
+ * 6e527d6). A verbatim copy — never hand-edited. Re-copy the source file if
+ * the DS bumps its token release.
+ */
+/*
+ * 42labs Design System — tokens.css (auto-generated; DO NOT EDIT).
+ * Version 0.5.0 · commit 6e527d6 · source-touched 2026-07-11T10:26:26-03:00
+ * Source: https://github.com/4242labs/design-system/blob/6e527d6/src/app/globals.css
+ * Contains layers 1-3 of globals.css (raw palette + semantic + scale).
+ * Layer 4 (@theme inline Tailwind bridge) and layer 5 (layout primitives) are NOT included.
+ */
+
+:root {
+  --orange-50: #FFF3EA;
+  --orange-100: #FFE1CC;
+  --orange-200: #FFC79E;
+  --orange-300: #FF9E5C;
+  --orange-400: #F97D33;
+  --orange-500: #E2621A;
+  --orange-600: #C25207;
+  --orange-700: #A84500;
+  --orange-800: #853700;
+  --orange-900: #632900;
+  --orange-925: #5C3216;
+  --orange-950: #2A1608;
+  --warm-0: #FFFFFF;
+  --warm-50: #FEFCF9;
+  --warm-100: #F7F3EE;
+  --warm-150: #F4F0EA;
+  --warm-175: #F1ECE6;
+  --warm-200: #EFE9E1;
+  --warm-300: #E2DAD0;
+  --warm-400: #C9BEB0;
+  --warm-500: #A0917F;
+  --warm-600: #766A5B;
+  --warm-700: #574E43;
+  --warm-750: #3D362E;
+  --warm-800: #2E2820;
+  --warm-820: #29231D;
+  --warm-850: #241F19;
+  --warm-900: #191510;
+  --warm-910: #1E1A15;
+  --warm-950: #14110D;
+  --warm-975: #100D09;
+  --emerald: #1F9D57;
+  --emerald-dark: #157A42;
+  --red: #D23A2E;
+  --red-dark: #A72A20;
+  --amber: #E0A50E;
+  --amber-dark: #7A5600;
+  --blue: #2E6FD6;
+  --blue-dark: #1F53A8;
+  --sky: #DCEAFB;
+  --blue-border: #BBD5F5;
+  --success-subtle-light: #DCF5E4;
+  --success-border-light: #B7E6C8;
+  --error-subtle-light: #FBE0DE;
+  --error-border-light: #F3C2BE;
+  --warning-subtle-light: #FDF0C9;
+  --warning-border-light: #F2DE9C;
+  --emerald-light: #5FD996;
+  --red-light: #F4756A;
+  --amber-light: #EEC55B;
+  --blue-light: #9DBFF5;
+  --blue-lighter: #BDD3F7;
+  --info-subtle-dark: #13233E;
+  --info-border-dark: #26436E;
+  --success-subtle-dark: #0E2E1C;
+  --success-border-dark: #1C4D34;
+  --error-subtle-dark: #2E120F;
+  --error-border-dark: #5A241E;
+  --warning-subtle-dark: #2E2408;
+  --warning-border-dark: #4A3A12;
+  --font-heading: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
+  --r-2: 6px;
+  --r-3: 8px;
+  --r-4: 10px;
+  --r-full: 999px;
+  --pad-card: 24px;
+  --pad-x: clamp(20px, 5vw, 32px);
+  --w-sm: 640px;
+  --w-md: 768px;
+  --w-lg: 1024px;
+  --w-xl: 1100px;
+  --bp-sm: 640px;
+  --bp-md: 768px;
+  --bp-lg: 1024px;
+  --surface: var(--warm-50);
+  --surface-alt: var(--warm-0);
+  --surface-muted: var(--warm-150);
+  --border: var(--warm-300);
+  --fg: var(--warm-900);
+  --fg-2: var(--warm-700);
+  --fg-muted: var(--warm-600);
+  --fg-disabled: var(--warm-500);
+  --accent: var(--orange-700);
+  --accent-hover: var(--orange-800);
+  --accent-solid: var(--orange-700);
+  --accent-solid-hover: var(--orange-800);
+  --accent-soft: var(--orange-50);
+  --accent-border: var(--orange-200);
+  --accent-focus: var(--orange-400);
+  --accent-on: var(--warm-0);
+  --link: var(--orange-700);
+  --link-hover: var(--orange-800);
+  --logo: var(--orange-700);
+}
+
+body.theme-dark {
+  --surface: var(--warm-950);
+  --surface-alt: var(--warm-910);
+  --surface-muted: var(--warm-820);
+  --border: var(--warm-800);
+  --fg: var(--warm-175);
+  --fg-2: var(--warm-400);
+  --fg-muted: var(--warm-500);
+  --fg-disabled: var(--warm-600);
+  --accent: var(--orange-300);
+  --accent-hover: var(--orange-200);
+  --accent-solid: var(--orange-300);
+  --accent-solid-hover: var(--orange-200);
+  --accent-soft: var(--orange-950);
+  --accent-border: var(--orange-925);
+  --accent-focus: var(--orange-300);
+  --accent-on: var(--warm-950);
+  --link: var(--orange-300);
+  --link-hover: var(--orange-200);
+  --logo: var(--orange-300);
+}

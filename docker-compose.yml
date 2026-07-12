@@ -1,0 +1,11 @@
+services:
+  ff3-entropy:
+    build: .
+    image: ff3-entropy
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      FIREFLY_III_URL: ${FIREFLY_III_URL}
+      FIREFLY_III_TOKEN: ${FIREFLY_III_TOKEN}
+      MATCH_DAYS: ${MATCH_DAYS:-5}
+    restart: unless-stopped

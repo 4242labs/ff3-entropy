@@ -1,0 +1,148 @@
+/*
+ * shadcn (new-york) -> 42labs DS token bridge.
+ * The only hand-written CSS in the app: this is config (a variable
+ * alias map), not bespoke component styling. shadcn's primitives + our
+ * hand-authored components consume the --background/--foreground/... vars
+ * below; every value on the right is a DS semantic token from
+ * tokens.latest.css. Do not add raw hex here or anywhere else in src/.
+ *
+ * DS itself switches palettes on `body.theme-dark` (see tokens.latest.css).
+ * That does NOT make this bridge dark-mode-aware "for free", even though
+ * every alias below points at a DS var rather than a literal: custom
+ * properties are substituted at computed-value time on the element where
+ * they're *declared*, not where they're consumed. Since these aliases are
+ * only declared once, at `:root`, `--background: var(--surface)` resolves
+ * to light `--surface` right there at `:root` and that already-resolved
+ * (light) value is what inherits down to every descendant — including
+ * anything under `body.theme-dark`. The dark override of `--surface` at
+ * `body` scope never gets a chance to feed back into `--background`,
+ * because nothing re-declares `--background` at `body` scope to trigger a
+ * fresh substitution. Verified in-browser: toggling `theme-dark` on
+ * `<body>` left the app's surfaces/text light. Fix: re-declare the exact
+ * same alias set below inside a `body.theme-dark` block so each alias
+ * re-resolves against the dark DS tokens at that scope. Tailwind's
+ * `dark:` variant is wired to `body.theme-dark` (see index.css), so dark-mode
+ * utilities work alongside the aliases.
+ */
+
+:root {
+  --background: var(--surface);
+  --foreground: var(--fg);
+
+  --card: var(--surface-alt);
+  --card-foreground: var(--fg);
+
+  --popover: var(--surface-alt);
+  --popover-foreground: var(--fg);
+
+  --muted: var(--surface-muted);
+  --muted-foreground: var(--fg-muted);
+
+  --primary: var(--accent-solid);
+  --primary-foreground: var(--accent-on);
+
+  --secondary: var(--surface-muted);
+  --secondary-foreground: var(--fg);
+
+  /* Also per R1: this intentionally shadows DS's own `--accent` (link/logo
+     colour, still available unshadowed as `--link`) with the shadcn concept
+     (a soft hover/highlight background). Not a cycle: `--accent-soft` is a
+     distinct DS var name, so this resolves cleanly — it just means don't
+     reach for `--accent` expecting DS's link colour inside this app; use
+     `--link` for that.
+
+     `--accent-foreground` is the TEXT drawn on that soft background, so it
+     must NOT be `var(--accent)`: `--accent` is re-declared just above on this
+     same `:root`, so it would resolve to `--accent-soft` — i.e. text painted
+     in exactly the background colour, rendering it invisible. (Caught live:
+     the highlighted row of every cmdk/Select list came out blank, since they
+     all use `bg-accent` + `text-accent-foreground`.) Use the normal
+     foreground, matching `--sidebar-accent-foreground` below. */
+  --accent: var(--accent-soft);
+  --accent-foreground: var(--fg);
+
+  --destructive: var(--red);
+  --destructive-foreground: var(--warm-0);
+
+  /*
+   * NOTE (deviation from the spec's literal text, functionally identical):
+   * shadcn's alias name and the DS
+   * token name are both literally `--border`. Re-declaring `--border` as
+   * `var(--border)` on the same `:root` is a direct self-reference, which
+   * CSS defines as invalid at computed-value time (the property would
+   * resolve to nothing, breaking every border in the app). tokens.latest.css
+   * already defines `--border` with exactly the intended value (incl. the
+   * `body.theme-dark` override), so no re-declaration is needed here — the
+   * alias is satisfied by omission. `--input` is a distinct name, so
+   * `var(--border)` below reads the DS value with no cycle.
+   */
+  --input: var(--border);
+  --ring: var(--accent-focus);
+
+  --radius: var(--r-3);
+
+  /* shadcn sidebar contract -> DS tokens (mirrors the DS's own globals.css
+     mapping). Declared here and re-declared under body.theme-dark below for
+     the same substitution-timing reason as the aliases above. */
+  --sidebar: var(--surface-alt);
+  --sidebar-foreground: var(--fg);
+  --sidebar-primary: var(--accent-solid);
+  --sidebar-primary-foreground: var(--accent-on);
+  --sidebar-accent: var(--accent-soft);
+  --sidebar-accent-foreground: var(--fg);
+  --sidebar-ring: var(--accent-focus);
+  /* --sidebar-border omitted: DS already defines --border (incl. the dark
+     override), and --sidebar-border: var(--border) reads it with no cycle —
+     but the shadcn utility is `border-sidebar-border`, which needs the alias,
+     so define it via a distinct name. It is NOT a self-reference. */
+  --sidebar-border: var(--border);
+}
+
+/*
+ * Dark-mode re-resolution (see header comment): identical right-hand sides
+ * to the :root block above, just re-declared at `body.theme-dark` scope so
+ * each alias picks up the dark DS tokens tokens.latest.css sets there
+ * (--surface, --fg, --accent-*, etc.) instead of inheriting the already-
+ * resolved light values from :root. `--border`/`--radius` are omitted for
+ * the same reason as :root: `--border` would self-reference, and
+ * tokens.latest.css already flips the underlying DS `--border` value under
+ * `body.theme-dark` directly, so the alias is satisfied by omission; `--radius`
+ * isn't themed.
+ */
+body.theme-dark {
+  --background: var(--surface);
+  --foreground: var(--fg);
+
+  --card: var(--surface-alt);
+  --card-foreground: var(--fg);
+
+  --popover: var(--surface-alt);
+  --popover-foreground: var(--fg);
+
+  --muted: var(--surface-muted);
+  --muted-foreground: var(--fg-muted);
+
+  --primary: var(--accent-solid);
+  --primary-foreground: var(--accent-on);
+
+  --secondary: var(--surface-muted);
+  --secondary-foreground: var(--fg);
+
+  --accent: var(--accent-soft);
+  --accent-foreground: var(--fg);
+
+  --destructive: var(--red);
+  --destructive-foreground: var(--warm-0);
+
+  --input: var(--border);
+  --ring: var(--accent-focus);
+
+  --sidebar: var(--surface-alt);
+  --sidebar-foreground: var(--fg);
+  --sidebar-primary: var(--accent-solid);
+  --sidebar-primary-foreground: var(--accent-on);
+  --sidebar-accent: var(--accent-soft);
+  --sidebar-accent-foreground: var(--fg);
+  --sidebar-ring: var(--accent-focus);
+  --sidebar-border: var(--border);
+}

@@ -1,0 +1,301 @@
+{
+  "range": {
+    "start": "2026-07-12",
+    "end": "2027-01-11",
+    "granularity": "month"
+  },
+  "filters": {
+    "type": null,
+    "category": null,
+    "account": null,
+    "currency": null
+  },
+  "currencies": {
+    "BRL": {
+      "out": 2018.5,
+      "in": 0.0,
+      "net": -2018.5
+    },
+    "USD": {
+      "out": 706.5,
+      "in": 457.5,
+      "net": -249.0
+    }
+  },
+  "periods": [
+    {
+      "key": "2026-07",
+      "label": "Jul 2026",
+      "items": [
+        {
+          "date": "2026-07-12",
+          "title": "Streaming Co (monthly)",
+          "type": "transfer",
+          "amount": 50.5,
+          "currency": "BRL",
+          "source": "Checking",
+          "destination": "Savings",
+          "category": null,
+          "status": "upcoming",
+          "matched_txn_id": null
+        },
+        {
+          "date": "2026-07-27",
+          "title": "Cloud Hosting (monthly)",
+          "type": "withdrawal",
+          "amount": 87.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "Cloud Hosting",
+          "category": "Utilities",
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "BRL": {
+          "xfer": 50.5,
+          "out": 87.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 2
+      }
+    },
+    {
+      "key": "2026-08",
+      "label": "Aug 2026",
+      "items": [
+        {
+          "date": "2026-08-11",
+          "title": "Gym Membership (monthly)",
+          "type": "withdrawal",
+          "amount": 124.5,
+          "currency": "USD",
+          "source": "Rewards Card",
+          "destination": "Gym Membership",
+          "category": "Health",
+          "status": "upcoming",
+          "matched_txn_id": null
+        },
+        {
+          "date": "2026-08-26",
+          "title": "Insurance Ltd (monthly)",
+          "type": "withdrawal",
+          "amount": 161.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "Insurance Ltd",
+          "category": "Leisure",
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "USD": {
+          "out": 124.5
+        },
+        "BRL": {
+          "out": 161.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 2
+      }
+    },
+    {
+      "key": "2026-09",
+      "label": "Sep 2026",
+      "items": [
+        {
+          "date": "2026-09-10",
+          "title": "Music Service (monthly)",
+          "type": "withdrawal",
+          "amount": 198.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "Music Service",
+          "category": null,
+          "status": "upcoming",
+          "matched_txn_id": null
+        },
+        {
+          "date": "2026-09-25",
+          "title": "Language App (monthly)",
+          "type": "withdrawal",
+          "amount": 235.5,
+          "currency": "USD",
+          "source": "Rewards Card",
+          "destination": "Language App",
+          "category": "Utilities",
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "BRL": {
+          "out": 198.5
+        },
+        "USD": {
+          "out": 235.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 2
+      }
+    },
+    {
+      "key": "2026-10",
+      "label": "Oct 2026",
+      "items": [
+        {
+          "date": "2026-10-10",
+          "title": "News Digital (monthly)",
+          "type": "withdrawal",
+          "amount": 272.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "News Digital",
+          "category": "Health",
+          "status": "upcoming",
+          "matched_txn_id": null
+        },
+        {
+          "date": "2026-10-25",
+          "title": "Design Tool (monthly)",
+          "type": "transfer",
+          "amount": 309.5,
+          "currency": "BRL",
+          "source": "Checking",
+          "destination": "Savings",
+          "category": "Leisure",
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "BRL": {
+          "out": 272.5,
+          "xfer": 309.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 2
+      }
+    },
+    {
+      "key": "2026-11",
+      "label": "Nov 2026",
+      "items": [
+        {
+          "date": "2026-11-09",
+          "title": "Savings Transfer (monthly)",
+          "type": "withdrawal",
+          "amount": 346.5,
+          "currency": "USD",
+          "source": "Rewards Card",
+          "destination": "Savings Transfer",
+          "category": null,
+          "status": "upcoming",
+          "matched_txn_id": null
+        },
+        {
+          "date": "2026-11-24",
+          "title": "Salary Inc (monthly)",
+          "type": "withdrawal",
+          "amount": 383.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "Salary Inc",
+          "category": "Utilities",
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "USD": {
+          "out": 346.5
+        },
+        "BRL": {
+          "out": 383.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 2
+      }
+    },
+    {
+      "key": "2026-12",
+      "label": "Dec 2026",
+      "items": [
+        {
+          "date": "2026-12-09",
+          "title": "Streaming Co (monthly)",
+          "type": "withdrawal",
+          "amount": 420.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "Streaming Co",
+          "category": "Health",
+          "status": "upcoming",
+          "matched_txn_id": null
+        },
+        {
+          "date": "2026-12-24",
+          "title": "Cloud Hosting (monthly)",
+          "type": "deposit",
+          "amount": 457.5,
+          "currency": "USD",
+          "source": "Checking",
+          "destination": "Cloud Hosting",
+          "category": "Leisure",
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "BRL": {
+          "out": 420.5
+        },
+        "USD": {
+          "in": 457.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 2
+      }
+    },
+    {
+      "key": "2027-01",
+      "label": "Jan 2027",
+      "items": [
+        {
+          "date": "2027-01-08",
+          "title": "Gym Membership (monthly)",
+          "type": "withdrawal",
+          "amount": 494.5,
+          "currency": "BRL",
+          "source": "Rewards Card",
+          "destination": "Gym Membership",
+          "category": null,
+          "status": "upcoming",
+          "matched_txn_id": null
+        }
+      ],
+      "totals": {
+        "BRL": {
+          "out": 494.5
+        }
+      },
+      "status_counts": {
+        "upcoming": 1
+      }
+    }
+  ],
+  "meta": {
+    "recurrences_total": 10,
+    "active": 0,
+    "match_window_days": 5,
+    "item_count": 13
+  }
+}
