@@ -1,0 +1,8 @@
+name: LGTM
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gate:
+    uses: 4242labs/lgtm/.github/workflows/gate.yml@main
