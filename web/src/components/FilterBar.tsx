@@ -39,7 +39,7 @@ export function FilterBar({ options, filters, onChange }: FilterBarProps) {
         onChange={(v) => set('category', v)}
       />
       <FacetedFilter
-        title="Account"
+        title="Asset Account"
         options={options.accounts.map((a) => ({ value: a, label: a }))}
         selected={filters.account}
         onChange={(v) => set('account', v)}

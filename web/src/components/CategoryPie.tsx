@@ -14,8 +14,8 @@ function groupKey(item: ProjectionItem, groupBy: PieGroupBy): string {
     case 'category':
       return item.category ?? 'Uncategorised'
     case 'account':
-      // For an expense (withdrawal), `source` is the paying asset account —
-      // the meaningful breakdown when categories are unset.
+      // The pie only ever sums withdrawals, so `source` is always the paying
+      // asset account — the meaningful breakdown when categories are unset.
       return item.source ?? 'Uncategorised'
     case 'payee':
       return item.title || 'Uncategorised'
@@ -98,7 +98,7 @@ export function CategoryPie({ periods, availableCurrencies }: CategoryPieProps) 
           <Tabs value={groupBy} onValueChange={(v) => setGroupBy(v as PieGroupBy)}>
             <TabsList>
               <TabsTrigger value="category">Category</TabsTrigger>
-              <TabsTrigger value="account">Account</TabsTrigger>
+              <TabsTrigger value="account">Asset Account</TabsTrigger>
               <TabsTrigger value="payee">Payee</TabsTrigger>
             </TabsList>
           </Tabs>

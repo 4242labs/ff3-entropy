@@ -36,8 +36,9 @@ pretending.
 - **Outstanding** — everything unconfirmed and already due, including the months
   behind you.
 - **Due by Month-End** — the same, plus what's still ahead this month.
-- Filter by type, category, account or currency; totals never cross-sum
-  currencies.
+- Filter by type, category, **asset account** or currency; totals never
+  cross-sum currencies. (The account facet lists only your own asset accounts —
+  the paying/receiving side — never expense or revenue counterparties.)
 
 ## Run it
 

@@ -33,6 +33,25 @@ export interface FilterOptions {
   currencies: string[]
 }
 
+/** The user's OWN account(s) on an item — the "asset" side, keyed off
+ * direction. Firefly guarantees: a withdrawal's SOURCE, a deposit's
+ * DESTINATION, and BOTH ends of a transfer are asset/liability (own)
+ * accounts; the opposite end is an expense (payee) or revenue (payer)
+ * account. The "Asset Account" facet lists and matches on these only, so
+ * vendor/payee names never pollute the account dropdown. */
+export function assetAccountsOf(
+  item: Pick<ProjectionItem, 'type' | 'source' | 'destination'>,
+): string[] {
+  switch (item.type) {
+    case 'withdrawal':
+      return item.source ? [item.source] : []
+    case 'deposit':
+      return item.destination ? [item.destination] : []
+    case 'transfer':
+      return [item.source, item.destination].filter((a): a is string => a !== null)
+  }
+}
+
 /** Union of values present, computed over the UNFILTERED dataset —
  * this is what populates the filter dropdowns, and must not shrink as the
  * user narrows other filters (avoids the "option collapse" trap). */
@@ -48,8 +67,7 @@ export function getFilterOptions(data: ProjectionsResponse): FilterOptions {
       types.add(it.type)
       if (it.category) categories.add(it.category)
       else hasUncategorised = true
-      if (it.source) accounts.add(it.source)
-      if (it.destination) accounts.add(it.destination)
+      for (const a of assetAccountsOf(it)) accounts.add(a)
       if (it.currency) currencies.add(it.currency)
     }
   }
@@ -80,9 +98,8 @@ export function itemMatchesFilters(item: ProjectionItem, filters: ActiveFilters)
   }
 
   if (filters.account.length) {
-    const hit =
-      (item.source !== null && filters.account.includes(item.source)) ||
-      (item.destination !== null && filters.account.includes(item.destination))
+    // Match on the OWN (asset) side only — see assetAccountsOf.
+    const hit = assetAccountsOf(item).some((a) => filters.account.includes(a))
     if (!hit) return false
   }
 

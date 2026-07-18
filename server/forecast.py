@@ -272,8 +272,15 @@ def build_projection(granularity: str = "month",
             amt = abs(float(tx.get("amount") or 0))
             if category and cat != category:
                 continue
-            if account and account not in (src, dst):
-                continue
+            # The account facet filters on the OWN (asset) side only — a
+            # withdrawal's source, a deposit's destination, both ends of a
+            # transfer (Firefly's account-type invariant). This keeps expense
+            # (payee) / revenue (payer) names out of the "Asset Account" filter.
+            if account:
+                own = (src,) if rtype == "withdrawal" else \
+                      (dst,) if rtype == "deposit" else (src, dst)
+                if account not in own:
+                    continue
             if currency and cur != currency:
                 continue
             for d in occ_dates:
