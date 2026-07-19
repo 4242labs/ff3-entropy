@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { fetchForecast } from '@/lib/api'
+import { AuthExpiredError, fetchForecast } from '@/lib/api'
 import type { ProjectionsResponse } from '@/lib/types'
 
 interface Query {
@@ -30,6 +30,13 @@ export function useProjections(query: Query) {
       })
       .catch((err) => {
         if (cancelled) return
+        // Under VITE_AUTH_RELOAD, an expired auth-proxy session reloads the
+        // page (bouncing through the login) instead of surfacing a retryable
+        // error. Never thrown when the flag is off, so this is inert by default.
+        if (err instanceof AuthExpiredError) {
+          window.location.reload()
+          return
+        }
         // Keep whatever `data` was already loaded (if any) so a failed
         // refresh/period-switch doesn't wipe a previously good render —
         // App.tsx shows it dimmed with an inline error, not a blank state.
