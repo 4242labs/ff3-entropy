@@ -100,7 +100,20 @@ sees the product's whole point without connecting anything.
 | `FIREFLY_III_URL` | — | Your instance, no trailing slash. **Required.** |
 | `FIREFLY_III_TOKEN` | — | Personal Access Token. **Required.** |
 | `MATCH_DAYS` | `5` | How far either side of the expected date a real transaction still counts as a match. |
+| `FIREFLY_CF_ACCESS_CLIENT_ID` | — | Optional. Set both CF-Access vars if your Firefly III sits behind a Cloudflare Access service token; the pair is added as request headers. Unset → not sent. |
+| `FIREFLY_CF_ACCESS_CLIENT_SECRET` | — | Optional. See above. |
 | `PORT` | `8000` | Host port. |
+
+### Consuming this as a downstream app
+
+You can run this repo **unmodified** and mount it inside another app (behind your own auth, under a
+subpath) purely via build-time flags — no fork needed. Set these when running `npm run build` in `web/`:
+
+| Build flag | Default | |
+| --- | --- | --- |
+| `VITE_BASE` | `./` | Public base path when the SPA is mounted under a subpath, e.g. `/entropy/`. |
+| `VITE_API_BASE` | `api/forecast` | The forecast endpoint the SPA calls (override if you proxy it elsewhere, e.g. `/projections/data`). |
+| `VITE_AUTH_RELOAD` | off | Set to `1` when the server sits behind an auth proxy (e.g. Cloudflare Access): an expired session (opaque redirect / non-JSON) triggers a one-shot reload to re-authenticate instead of a stuck error. |
 
 ## License
 
