@@ -90,6 +90,23 @@ def test_fatura_clears_installment_month(monkeypatch):
     assert out["2026-05-09"]["remaining"] == 1
 
 
+def test_noisy_account_surfaces_not_silently_cleared(monkeypatch):
+    """A noisy account (more identifying payments than occurrences, no slug) must NOT
+    be auto-cleared and dropped — its occurrences stay open, flagged, for review."""
+    today = dt.date(2026, 8, 1)
+    recs = [_rec("Housekeeper", "withdrawal", 5, 1100, "Bank", "Maria", "2026-06-05")]
+    txns = [{"id": f"t{i}", "type": "withdrawal", "date": dt.date(2026, 6, 5 + i),
+             "amount": 50.0, "currency": "BRL", "source": "bank", "destination": "MARIA",
+             "description": "pix", "tags": []} for i in range(5)]   # 5 txns > 3 occ
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert out, "flagged commitment must not vanish from the outstanding set"
+    assert all(it.get("flags") == ["noisy_account"] for it in out.values())
+    assert out["2026-06-05"]["status"] == "needs_review"   # not silently 'paid'
+
+
 def test_non_fatura_transfer_does_not_clear(monkeypatch):
     """A transfer that is NOT into the card must not clear an installment month."""
     today = dt.date(2026, 7, 12)

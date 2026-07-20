@@ -464,10 +464,15 @@ def build_projection(granularity: str = "month",
                 # that also has a monthly commitment). Flag for we-need-to-talk.
                 if (not slug) and len(avail) > len(occ_sorted):
                     flags.append("noisy_account")
-                n = min(len(avail), len(occ_sorted))
-                for d, t in zip(occ_sorted[:n], avail[:n]):
-                    filled[d] = t.get("id")
-                    used.add(id(t))
+                # Only auto-clear when attribution is unambiguous. A flagged account
+                # (shared or noisy) can't be cleanly attributed, so leave its
+                # occurrences OPEN — they surface for we-need-to-talk rather than being
+                # silently marked paid and dropped from the outstanding set.
+                if not flags:
+                    n = min(len(avail), len(occ_sorted))
+                    for d, t in zip(occ_sorted[:n], avail[:n]):
+                        filled[d] = t.get("id")
+                        used.add(id(t))
 
             remaining = _remaining(a, rtype, src, dst, cards, hist_settle, hist_txns, slug)
             for d in occ_sorted:
