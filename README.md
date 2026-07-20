@@ -21,8 +21,8 @@ Every occurrence you see is in one of two states:
 
 | Status | Meaning |
 | --- | --- |
-| **Upcoming** | Due in the future. Nothing to do yet. |
-| **Needs review** | Its date has passed and no matching transaction turned up. |
+| **Upcoming** | Due in the future. Nothing to do yet. Finite installments show how many payments remain. |
+| **Needs review** | Its date has passed and no payment accounts for it. |
 
 When an occurrence *does* match a real transaction, it's confirmed — and it
 simply drops out of the view. Entropy shows what's outstanding, not what's
@@ -30,9 +30,13 @@ already done: the done half already lives in Firefly III, and Entropy doesn't
 restate it.
 
 "Needs review" is the point of the whole thing. Entropy for Firefly III never
-guesses: if it can't find a real transaction with the same type, the same exact
-amount, on the same account, within a few days of the expected date, it says so
-instead of pretending.
+guesses. It marks an occurrence paid by the **account that paid it, not the
+amount** — so a bill whose amount drifts, or that you paid late or in the next
+month, still counts; each real payment clears the earliest still-open occurrence.
+Credit-card installments have no payment of their own — they clear when that
+month's card bill (fatura) is settled. If nothing accounts for an occurrence once
+its date has passed it says so, and if a payment can't be attributed cleanly (a
+shared or noisy account) it flags it — instead of pretending either way.
 
 ## What you see
 
@@ -105,7 +109,7 @@ sees the product's whole point without connecting anything.
 | --- | --- | --- |
 | `FIREFLY_III_URL` | — | Your instance, no trailing slash. **Required.** |
 | `FIREFLY_III_TOKEN` | — | Personal Access Token. **Required.** |
-| `MATCH_DAYS` | `5` | How far either side of the expected date a real transaction still counts as a match. |
+| `MATCH_DAYS` | `5` | Fetch padding — how far past the window edges transactions are still pulled in (so an occurrence near an edge can still be accounted for). Matching itself is amount- and date-blind. |
 | `FIREFLY_CF_ACCESS_CLIENT_ID` | — | Optional. Set both CF-Access vars if your Firefly III sits behind a Cloudflare Access service token; the pair is added as request headers. Unset → not sent. |
 | `FIREFLY_CF_ACCESS_CLIENT_SECRET` | — | Optional. See above. |
 | `PORT` | `8000` | Host port. |
