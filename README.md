@@ -1,41 +1,47 @@
 # Entropy for Firefly III
 
-![Entropy for Firefly III — Outstanding view showing an overdue backlog, a needs-review item, and income/expense totals](docs/forecast.png)
+![Entropy for Firefly III — Overdue view: a needs-review backlog with per-currency totals and charts](docs/forecast.png)
 
 **[Live demo →](https://ff3e.42labs.io)** — 100% synthetic data, no Firefly III instance behind it.
 
-**What's coming, and whether it actually happened.**
+**What's still outstanding — overdue and upcoming, in one place.**
 
-Firefly III knows all your recurring transactions — rent, salary, that streaming
-subscription. But it won't lay them out in front of you and tell you which ones
-have already landed and which are quietly overdue.
+Firefly III records every transaction you've made and knows all your recurring
+ones — rent, salary, that streaming subscription. But it won't lay the recurring
+ones out in front of you and tell you which are quietly overdue and which are
+still ahead.
 
-Entropy for Firefly III does exactly that, and nothing else. It's a read-only **Forecast**
-view: point it at your Firefly III, and it projects every recurring transaction
-forward, then matches each expected occurrence against your real booked
-transactions.
+Entropy for Firefly III does exactly that, and nothing else. It's a read-only
+view that **complements** Firefly III: point it at your instance, and it projects
+every recurring transaction forward, matches each expected occurrence against
+your real booked transactions, and then shows you **only what's left** — the
+outstanding set.
 
-Every occurrence ends up in one of five states:
+Every occurrence you see is in one of two states:
 
 | Status | Meaning |
 | --- | --- |
 | **Upcoming** | Due in the future. Nothing to do yet. |
-| **Paid** | An expense that's been booked. |
-| **Received** | Income that's arrived. |
-| **Done** | A transfer that went through. |
 | **Needs review** | Its date has passed and no matching transaction turned up. |
 
-That last one is the point of the whole thing. Entropy for Firefly III never guesses: if it
-can't find a real transaction with the same type, the same exact amount, on the
-same account, within a few days of the expected date, it says so instead of
-pretending.
+When an occurrence *does* match a real transaction, it's confirmed — and it
+simply drops out of the view. Entropy shows what's outstanding, not what's
+already done: the done half already lives in Firefly III, and Entropy doesn't
+restate it.
+
+"Needs review" is the point of the whole thing. Entropy for Firefly III never
+guesses: if it can't find a real transaction with the same type, the same exact
+amount, on the same account, within a few days of the expected date, it says so
+instead of pretending.
 
 ## What you see
 
 - **Day / Month / Year** — one period at a time, with a picker to jump anywhere.
-- **Outstanding** — everything unconfirmed and already due, including the months
+- **Overdue** — everything unconfirmed and already due, including the months
   behind you.
-- **Due by Month-End** — the same, plus what's still ahead this month.
+- **Due this month** — the same, plus what's still ahead this month.
+- A **Dashboard** (per-currency totals + charts) you can show or hide; the item
+  list is always there.
 - Filter by type, category, **asset account** or currency; totals never
   cross-sum currencies. (The account facet lists only your own asset accounts —
   the paying/receiving side — never expense or revenue counterparties.)

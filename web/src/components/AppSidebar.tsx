@@ -23,9 +23,11 @@ interface NavItem {
   icon: ComponentType<{ className?: string }>
 }
 
-// One entry per view. Entropy for Firefly III ships a single view today (Forecast); adding
-// another later is a new row here (+ a router when there's more than one).
-const NAV: NavItem[] = [{ key: 'forecast', label: 'Forecast', icon: CalendarClock }]
+// One entry per view. Entropy for Firefly III ships a single view today
+// (Outstanding & upcoming); adding another later is a new row here (+ a router
+// when there's more than one). The nav LABEL is the only place the view is
+// named — the header bar deliberately carries no title.
+const NAV: NavItem[] = [{ key: 'forecast', label: 'Outstanding & upcoming', icon: CalendarClock }]
 
 export function AppSidebar({ activeView = 'forecast' }: { activeView?: string }) {
   return (

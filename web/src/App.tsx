@@ -20,6 +20,25 @@ export default function App() {
   const [mode, setMode] = useState<ViewMode>('month')
   const [anchor, setAnchor] = useState<string>(() => todayISO())
   const [filters, setFilters] = useState<ActiveFilters>(EMPTY_FILTERS)
+  // Dashboard = the stat cards + charts. Shown by default; the choice persists
+  // across reloads. The item list below is never gated by this.
+  const [dashboardShown, setDashboardShown] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('entropy:dashboard') !== 'hidden'
+    } catch {
+      return true
+    }
+  })
+  const toggleDashboard = () =>
+    setDashboardShown((shown) => {
+      const next = !shown
+      try {
+        localStorage.setItem('entropy:dashboard', next ? 'shown' : 'hidden')
+      } catch {
+        /* private mode / storage disabled — session-only toggle is fine */
+      }
+      return next
+    })
 
   const cumulative = isCumulativeMode(mode)
 
@@ -68,7 +87,7 @@ export default function App() {
 
   const emptyMessage = cumulative
     ? mode === 'outstanding'
-      ? 'Nothing outstanding — everything due so far is accounted for.'
+      ? 'Nothing overdue — everything due so far is accounted for.'
       : 'Nothing due through the end of this month.'
     : 'No projected obligations in this period.'
 
@@ -92,6 +111,8 @@ export default function App() {
           filterOptions={filterOptions}
           filters={filters}
           onFiltersChange={setFilters}
+          dashboardShown={dashboardShown}
+          onToggleDashboard={toggleDashboard}
         />
 
         <main className="w-full max-w-[1280px] px-4 py-6 sm:px-6">
@@ -114,18 +135,22 @@ export default function App() {
                   <EmptyState message={emptyMessage} />
                 ) : (
                   <>
-                    <SummaryCards currencies={filtered.currencies} />
+                    {dashboardShown && (
+                      <>
+                        <SummaryCards currencies={filtered.currencies} />
 
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                      <CategoryPie
-                        periods={sortedFilteredPeriods}
-                        availableCurrencies={availableCurrencies}
-                      />
-                      <PeriodBar
-                        periods={sortedFilteredPeriods}
-                        availableCurrencies={availableCurrencies}
-                      />
-                    </div>
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                          <CategoryPie
+                            periods={sortedFilteredPeriods}
+                            availableCurrencies={availableCurrencies}
+                          />
+                          <PeriodBar
+                            periods={sortedFilteredPeriods}
+                            availableCurrencies={availableCurrencies}
+                          />
+                        </div>
+                      </>
+                    )}
 
                     <PeriodTable periods={sortedFilteredPeriods} />
                   </>

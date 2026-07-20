@@ -21,7 +21,7 @@ export interface FacetOption {
   label: string
   /** Compact form shown in the chip badge when selected. The full `label` is
    * still what the dropdown list (and search) uses. Keeps long options like
-   * "Due by Month-End" from blowing out the chip width. */
+   * a long option like "Due this month" from blowing out the chip width. */
   short?: string
 }
 

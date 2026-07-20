@@ -144,7 +144,7 @@ function recomputePeriodTotals(items: ProjectionItem[]) {
 export function applyFilters(
   data: ProjectionsResponse,
   filters: ActiveFilters,
-  /** Cumulative views (Outstanding / Due by Month-End) show ONLY what hasn't
+  /** Cumulative views (Overdue / Due this month) show ONLY what hasn't
    * happened yet or can't be confirmed — never the already Paid/Received/Done. */
   unconfirmedOnly = false,
 ): ProjectionsResponse {

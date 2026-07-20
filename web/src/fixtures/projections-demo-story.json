@@ -11,15 +11,15 @@
     "currency": null
   },
   "currencies": {
-    "BRL": {
-      "out": 2045.45,
-      "in": 0.0,
-      "net": -2045.45
-    },
     "USD": {
       "out": 216.0,
-      "in": 5300.0,
-      "net": 5084.0
+      "in": 2900.0,
+      "net": 2684.0
+    },
+    "BRL": {
+      "out": 1590.2,
+      "in": 0.0,
+      "net": -1590.2
     }
   },
   "periods": [
@@ -27,18 +27,6 @@
       "key": "2026-02",
       "label": "Feb 2026",
       "items": [
-        {
-          "date": "2026-02-03",
-          "title": "Comet Coffee Roasters (monthly)",
-          "type": "withdrawal",
-          "amount": 42.9,
-          "currency": "BRL",
-          "source": "Rewards Card",
-          "destination": "Comet Coffee Roasters",
-          "category": "Leisure",
-          "status": "paid",
-          "matched_txn_id": null
-        },
         {
           "date": "2026-02-18",
           "title": "Nebula Cloud Hosting (monthly)",
@@ -53,11 +41,11 @@
         }
       ],
       "totals": {
-        "BRL": { "out": 42.9 },
-        "USD": { "out": 24.0 }
+        "USD": {
+          "out": 24.0
+        }
       },
       "status_counts": {
-        "paid": 1,
         "needs_review": 1
       }
     },
@@ -65,18 +53,6 @@
       "key": "2026-03",
       "label": "Mar 2026",
       "items": [
-        {
-          "date": "2026-03-05",
-          "title": "Falcon Freelance Client (invoice #1042)",
-          "type": "deposit",
-          "amount": 1200.0,
-          "currency": "USD",
-          "source": "Falcon Freelance Client",
-          "destination": "Checking",
-          "category": null,
-          "status": "received",
-          "matched_txn_id": null
-        },
         {
           "date": "2026-03-20",
           "title": "Aurora Gym & Yoga (monthly)",
@@ -91,11 +67,11 @@
         }
       ],
       "totals": {
-        "USD": { "in": 1200.0 },
-        "BRL": { "out": 189.9 }
+        "BRL": {
+          "out": 189.9
+        }
       },
       "status_counts": {
-        "received": 1,
         "needs_review": 1
       }
     },
@@ -103,18 +79,6 @@
       "key": "2026-04",
       "label": "Apr 2026",
       "items": [
-        {
-          "date": "2026-04-02",
-          "title": "Checking → Savings (auto-sweep)",
-          "type": "transfer",
-          "amount": 500.0,
-          "currency": "BRL",
-          "source": "Checking",
-          "destination": "Savings",
-          "category": null,
-          "status": "done",
-          "matched_txn_id": null
-        },
         {
           "date": "2026-04-18",
           "title": "Lighthouse Insurance Co (monthly)",
@@ -129,10 +93,11 @@
         }
       ],
       "totals": {
-        "BRL": { "xfer": 500.0, "out": 245.5 }
+        "BRL": {
+          "out": 245.5
+        }
       },
       "status_counts": {
-        "done": 1,
         "needs_review": 1
       }
     },
@@ -166,8 +131,12 @@
         }
       ],
       "totals": {
-        "USD": { "in": 850.0 },
-        "BRL": { "out": 34.9 }
+        "USD": {
+          "in": 850.0
+        },
+        "BRL": {
+          "out": 34.9
+        }
       },
       "status_counts": {
         "needs_review": 2
@@ -188,27 +157,15 @@
           "category": "Education",
           "status": "needs_review",
           "matched_txn_id": null
-        },
-        {
-          "date": "2026-06-25",
-          "title": "Juniper Grocery Co-op (biweekly)",
-          "type": "withdrawal",
-          "amount": 412.35,
-          "currency": "BRL",
-          "source": "Checking",
-          "destination": "Juniper Grocery Co-op",
-          "category": "Groceries",
-          "status": "paid",
-          "matched_txn_id": null
         }
       ],
       "totals": {
-        "USD": { "out": 79.0 },
-        "BRL": { "out": 412.35 }
+        "USD": {
+          "out": 79.0
+        }
       },
       "status_counts": {
-        "needs_review": 1,
-        "paid": 1
+        "needs_review": 1
       }
     },
     {
@@ -225,18 +182,6 @@
           "destination": "Solstice Design Tools",
           "category": "Subscriptions",
           "status": "needs_review",
-          "matched_txn_id": null
-        },
-        {
-          "date": "2026-07-05",
-          "title": "Falcon Freelance Client (invoice #1044)",
-          "type": "deposit",
-          "amount": 1200.0,
-          "currency": "USD",
-          "source": "Falcon Freelance Client",
-          "destination": "Checking",
-          "category": null,
-          "status": "received",
           "matched_txn_id": null
         },
         {
@@ -265,12 +210,16 @@
         }
       ],
       "totals": {
-        "USD": { "out": 45.0, "in": 1200.0 },
-        "BRL": { "out": 320.0, "xfer": 500.0 }
+        "USD": {
+          "out": 45.0
+        },
+        "BRL": {
+          "out": 320.0,
+          "xfer": 500.0
+        }
       },
       "status_counts": {
         "needs_review": 1,
-        "received": 1,
         "upcoming": 2
       }
     },
@@ -316,8 +265,13 @@
         }
       ],
       "totals": {
-        "USD": { "out": 68.0, "in": 850.0 },
-        "BRL": { "out": 610.0 }
+        "USD": {
+          "out": 68.0,
+          "in": 850.0
+        },
+        "BRL": {
+          "out": 610.0
+        }
       },
       "status_counts": {
         "upcoming": 3
@@ -353,8 +307,12 @@
         }
       ],
       "totals": {
-        "USD": { "in": 1200.0 },
-        "BRL": { "out": 189.9 }
+        "USD": {
+          "in": 1200.0
+        },
+        "BRL": {
+          "out": 189.9
+        }
       },
       "status_counts": {
         "upcoming": 2
@@ -365,6 +323,6 @@
     "recurrences_total": 14,
     "active": 14,
     "match_window_days": 5,
-    "item_count": 19
+    "item_count": 14
   }
 }

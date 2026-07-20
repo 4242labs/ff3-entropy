@@ -1,6 +1,6 @@
 import type { Granularity, ViewMode } from './types'
 
-/** How far back the cumulative views (Outstanding / Due by Month-End) look for
+/** How far back the cumulative views (Overdue / Due this month) look for
  * still-unconfirmed obligations. The engine needs a bounded start date; 12
  * months comfortably covers real overdue while keeping the payload sane. */
 export const OVERDUE_LOOKBACK_MONTHS = 12

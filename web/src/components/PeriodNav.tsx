@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, ChevronRight, LayoutDashboard, RefreshCw } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -15,8 +15,8 @@ const VIEW_OPTIONS: { value: ViewMode; label: string; short?: string }[] = [
   { value: 'day', label: 'Day' },
   { value: 'month', label: 'Month' },
   { value: 'year', label: 'Year' },
-  { value: 'outstanding', label: 'Outstanding', short: 'Outst.' },
-  { value: 'month_end', label: 'Due by Month-End', short: 'EOM' },
+  { value: 'outstanding', label: 'Overdue' },
+  { value: 'month_end', label: 'Due this month', short: 'This month' },
 ]
 
 export interface PeriodNavProps {
@@ -37,6 +37,10 @@ export interface PeriodNavProps {
   filterOptions: FilterOptions | null
   filters: ActiveFilters
   onFiltersChange: (f: ActiveFilters) => void
+  /** Dashboard (stat cards + charts) visibility, and its toggle. The item list
+   * is never gated by this. */
+  dashboardShown: boolean
+  onToggleDashboard: () => void
 }
 
 /**
@@ -61,6 +65,8 @@ export function PeriodNav(props: PeriodNavProps) {
     filterOptions,
     filters,
     onFiltersChange,
+    dashboardShown,
+    onToggleDashboard,
   } = props
 
   const cumulative = isCumulativeMode(mode)
@@ -70,7 +76,6 @@ export function PeriodNav(props: PeriodNavProps) {
       <div className="flex w-full max-w-[1280px] flex-wrap items-center gap-2 px-4 py-3 sm:px-6">
         <SidebarTrigger className="-ml-1" />
         <Separator orientation="vertical" className="mx-1 hidden h-5 sm:block" />
-        <h1 className="mr-1 font-heading text-lg font-semibold tracking-tight">Forecast</h1>
 
         <FacetedFilter
           title="View"
@@ -137,6 +142,17 @@ export function PeriodNav(props: PeriodNavProps) {
               {needsReviewCount}
             </span>
           )}
+          <Button
+            variant={dashboardShown ? 'secondary' : 'outline'}
+            size="icon"
+            className="h-8 w-8"
+            onClick={onToggleDashboard}
+            aria-pressed={dashboardShown}
+            aria-label={dashboardShown ? 'Hide dashboard' : 'Show dashboard'}
+            title={dashboardShown ? 'Hide dashboard' : 'Show dashboard'}
+          >
+            <LayoutDashboard className="h-4 w-4" />
+          </Button>
           <Button
             variant="outline"
             size="icon"

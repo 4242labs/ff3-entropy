@@ -1,6 +1,10 @@
 // Shape of GET /api/forecast.
 
 export type ItemType = 'withdrawal' | 'deposit' | 'transfer'
+// NOTE: against a live Firefly III the engine emits only the OUTSTANDING set
+// (upcoming + needs_review) — a confirmed occurrence lives in Firefly III and is
+// dropped at the source. paid/received/done remain in the union because the
+// local dev fixture (fixtures/projections-wide.json) still exercises them.
 export type ItemStatus = 'paid' | 'received' | 'done' | 'upcoming' | 'needs_review'
 export type Granularity = 'day' | 'month' | 'year'
 
@@ -64,10 +68,11 @@ export type PieGroupBy = 'category' | 'account' | 'payee'
 /**
  * What the view is showing.
  * - day/month/year: ONE calendar period at a time, navigable (default: current).
- * - outstanding:    everything still UNCONFIRMED due on/before today — reaches
- *                   back past this month to surface overdue.
- * - month_end:      the same, capped at the last day of the current month
- *                   (i.e. outstanding + what's still ahead this month).
+ * - outstanding:    (labelled "Overdue") everything still UNCONFIRMED due
+ *                   on/before today — reaches back past this month.
+ * - month_end:      (labelled "Due this month") the same, capped at the last
+ *                   day of the current month (overdue + what's still ahead this
+ *                   month).
  * The last two are not calendar periods: they're anchored to "now" and are
  * filtered to unconfirmed statuses only, so prev/next doesn't apply.
  */

@@ -47,6 +47,14 @@ _DIR = {
     "deposit": ("received", "in"),
     "transfer": ("done", "xfer"),
 }
+# An occurrence that matched a real transaction is CONFIRMED — it already
+# happened and lives in Firefly III. Entropy complements Firefly III (it does
+# not restate it), so a confirmed occurrence is not emitted: the payload is the
+# OUTSTANDING set (upcoming + needs_review) only. The match still runs for every
+# occurrence — it is the only way to know a paused recurrence became a real
+# transaction, and it consumes the matched txn so a later occurrence can't
+# re-claim it — we simply drop the item once it is confirmed.
+_CONFIRMED = frozenset(s for s, _ in _DIR.values())  # {"paid", "received", "done"}
 _MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -300,6 +308,9 @@ def build_projection(granularity: str = "month",
             for d in occ_dates:
                 occ = {"type": rtype, "amount": amt, "source": src,
                        "destination": dst, "date": d}
+                # Always run the match — it consumes the matched txn (via `used`)
+                # so a later occurrence of the same recurrence can't re-claim it,
+                # even though a confirmed occurrence is dropped below.
                 match = _find_match(occ, txns, used)
                 if match:
                     status = _DIR.get(rtype, ("paid",))[0]
@@ -310,6 +321,10 @@ def build_projection(granularity: str = "month",
                 else:
                     status = "upcoming"
                     matched_id = None
+                # Emit the OUTSTANDING set only: confirmed occurrences already
+                # live in Firefly III and are not restated here.
+                if status in _CONFIRMED:
+                    continue
                 items.append({
                     "date": d.isoformat(), "title": title, "type": rtype,
                     "amount": amt, "currency": cur, "source": src,
