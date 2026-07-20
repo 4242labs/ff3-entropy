@@ -3,12 +3,20 @@
 Source of truth: your Firefly III **recurring transactions**. They can stay
 paused (they never auto-post, so nothing is ever fabricated). Their occurrences
 are projected forward across all three directions — withdrawal / deposit /
-transfer. Each occurrence is given a STATUS by matching a real booked
-transaction to it (same type + exact amount + same account, within a date
-window). An occurrence still unmatched once its date has passed is flagged for
-review — never guessed.
+transfer, bounded by first_date / repeat_until / nr_of_repetitions (a finite
+installment stops at N rather than forecasting forever).
 
-This module is pure read: it POSTs nothing to Firefly III and marks nothing.
+An occurrence is marked paid by ACCOUNT, never by amount:
+  • Mechanism A (dedicated account) — ordered-fill: each real payment identified
+    by the commitment's account (or a `cmt:<slug>` tag) clears the earliest still-
+    open occurrence, 1:1. Amount- and date-blind, so variable amounts and late /
+    cross-month payments still count. A shared identifying account → flagged.
+  • Mechanism B (credit-card installment) — fatura-driven: an occurrence is settled
+    iff its billing month has a fatura settlement (a transfer into the card account).
+    Installments carry no per-occurrence transaction; they clear in aggregate.
+
+An occurrence still open once its date has passed is flagged for review — never
+guessed. This module is pure read: it POSTs nothing to Firefly III and marks nothing.
 """
 from __future__ import annotations
 
@@ -115,9 +123,76 @@ def fetch_transactions(start: dt.date, end: dt.date) -> list[dict]:
                 "amount": abs(float(t.get("amount") or 0)),
                 "currency": t.get("currency_code"),
                 "source": t.get("source_name"), "destination": t.get("destination_name"),
-                "description": t.get("description"),
+                "description": t.get("description"), "tags": t.get("tags") or [],
             })
     return flat
+
+
+# ---------- classification helpers (Mechanism A / B) ----------
+
+def _norm(s: Optional[str]) -> str:
+    return (s or "").strip().lower()
+
+
+def _ym(d: dt.date) -> str:
+    return f"{d.year:04d}-{d.month:02d}"
+
+
+def _ident_key(rtype: str, src: Optional[str], dst: Optional[str]) -> tuple:
+    """The account that identifies a commitment's payments — never the amount.
+    Withdrawal → its payee (destination); deposit → its payer (source);
+    transfer → the (source, destination) pair."""
+    if rtype == "withdrawal":
+        return ("W", _norm(dst))
+    if rtype == "deposit":
+        return ("D", _norm(src))
+    return ("T", _norm(src), _norm(dst))
+
+
+def _cmt_tag(tags) -> Optional[str]:
+    """The commitment tag `cmt:<slug>` on a transaction, if any — the authoritative
+    identity when an account is shared (a Firefly rule / the accounting agent sets it)."""
+    for t in (tags or []):
+        if isinstance(t, str) and t.lower().startswith("cmt:"):
+            return t.lower()
+    return None
+
+
+def fetch_card_accounts() -> set:
+    """Names (lowercased) of credit-card accounts — ccAsset assets + liabilities.
+    A recurrence whose source is a card settles via the monthly fatura (one transfer
+    into the card), NOT via a per-occurrence transaction, so it needs Mechanism B."""
+    names: set = set()
+    for atype in ("asset", "liabilities"):
+        try:
+            for ac in _paginate("/api/v1/accounts", {"type": atype, "limit": 100}):
+                aa = ac.get("attributes", {})
+                is_card = (atype == "liabilities"
+                           or aa.get("account_role") == "ccAsset"
+                           or aa.get("credit_card_type"))
+                if is_card and aa.get("name"):
+                    names.add(_norm(aa.get("name")))
+        except Exception:
+            log.warning("forecast: card-account fetch failed for type=%s", atype)
+    return names
+
+
+def _settlement_months(txns: list[dict], cards: set) -> dict:
+    """Per card, the set of YYYY-MM in which a fatura settlement was booked — a
+    transfer INTO the card account ("Pagamento cartão CC…"). The presence of month
+    M's settlement clears one occurrence of every installment on that card in M."""
+    sm: dict = defaultdict(set)
+    for t in txns:
+        if t.get("type") != "transfer":
+            continue
+        d = _norm(t.get("destination"))
+        if d not in cards or not t.get("date"):
+            continue
+        desc = _norm(t.get("description"))
+        if "pagamento" not in desc and "fatura" not in desc:
+            continue  # a non-payment transfer into a card (refund/balance) clears nothing
+        sm[d].add(_ym(t["date"]))
+    return sm
 
 
 # ---------- occurrence extraction + matching ----------
@@ -207,44 +282,66 @@ def _gen(rtype: str, moment: str, step: int, first: dt.date,
 def _occurrences(rec_attr: dict, start: dt.date, end: dt.date) -> list[dt.date]:
     """Compute occurrences over [start, end] from the recurrence rules — past AND
     future (Firefly's API only serves future ones, but paid/open needs the recent
-    past too). Bounded by first_date / repeat_until."""
+    past too). Bounded by first_date / repeat_until / nr_of_repetitions.
+
+    A finite series (nr_of_repetitions set — e.g. a card installment) fires exactly
+    N times from first_date. We generate from first_date (NOT from `start`) so N can
+    be counted from the true start of the series, truncate to N, THEN window-filter.
+    Otherwise an installment would be forecast forever instead of stopping at N."""
     first = _parse_date(rec_attr.get("first_date"))
     if not first:
         return []
     until = _parse_date(rec_attr.get("repeat_until"))
-    lo = max(start, first)
     hi = end if until is None else min(end, until)
-    if lo > hi:
+    if first > hi:
         return []
     out: set = set()
     for rep in rec_attr.get("repetitions", []):
         out |= _gen(rep.get("type") or "monthly", str(rep.get("moment") or ""),
-                    int(rep.get("skip") or 0) + 1, first, lo, hi)
-    return sorted(out)
+                    int(rep.get("skip") or 0) + 1, first, first, hi)
+    dates = sorted(out)
+    nrep = rec_attr.get("nr_of_repetitions")
+    if nrep is not None:               # honor a finite N (0 → an empty, spent series)
+        dates = dates[:int(nrep)]
+    return [d for d in dates if d >= start]
 
 
-def _find_match(occ, txns: list[dict], used: set) -> Optional[dict]:
-    """A real transaction matching this expected occurrence: same type + exact
-    amount + same account(s), within ±MATCH_DAYS. Each txn is consumed once."""
-    best = None
-    for t in txns:
-        if id(t) in used or t["type"] != occ["type"]:
-            continue
-        if abs(t["amount"] - occ["amount"]) > 0.01:
-            continue
-        if occ["source"] and t["source"] and t["source"].strip().lower() != occ["source"].strip().lower():
-            continue
-        if occ["destination"] and t["destination"] and t["destination"].strip().lower() != occ["destination"].strip().lower():
-            continue
-        delta = abs((t["date"] - occ["date"]).days)
-        if delta > MATCH_DAYS:
-            continue
-        if best is None or delta < best[0]:
-            best = (delta, t)
-    if best:
-        used.add(id(best[1]))
-        return best[1]
-    return None
+def _matches_A(t: dict, rtype: str, key: tuple, slug: Optional[str]) -> bool:
+    """Does a real transaction belong to this Mechanism-A commitment?
+    With a slug: only the txn tagged `cmt:<slug>`. Without: the identifying account,
+    but NEVER a txn already tagged for some other commitment (a tagged payment is
+    reserved for its own recurrence — an untagged sibling must not steal it)."""
+    if t.get("type") != rtype:
+        return False
+    if slug:
+        return _cmt_tag(t.get("tags")) == slug
+    if _cmt_tag(t.get("tags")) is not None:
+        return False
+    return _ident_key(t.get("type"), t.get("source"), t.get("destination")) == key
+
+
+def _remaining(a: dict, rtype: str, src, dst, cards: set,
+               hist_settle: dict, hist_txns: list, slug: Optional[str]) -> Optional[int]:
+    """Installments still unpaid across the WHOLE finite series (window-independent):
+    total N minus occurrences already settled, counted from payment history back to
+    first_date — NOT the display window (which may start at `today`). None for
+    open-ended recurrences."""
+    nrep = a.get("nr_of_repetitions")
+    if nrep is None:
+        return None
+    first = _parse_date(a.get("first_date"))
+    if not first:
+        return None
+    full = _occurrences(a, first, dt.date(first.year + 30, first.month, 1))
+    if not full:
+        return 0
+    if _norm(src) in cards and rtype == "withdrawal":
+        sm = hist_settle.get(_norm(src), set())
+        paid = sum(1 for d in full if _ym(d) in sm)
+    else:
+        key = _ident_key(rtype, src, dst)
+        paid = min(sum(1 for t in hist_txns if _matches_A(t, rtype, key, slug)), len(full))
+    return max(0, len(full) - paid)
 
 
 def _period_key(d: dt.date, gran: str) -> tuple[str, str]:
@@ -272,8 +369,41 @@ def build_projection(granularity: str = "month",
 
     recs = fetch_recurrences()
     txns = fetch_transactions(start, end)
-    used: set = set()
+    cards = fetch_card_accounts()
+    settle_months = _settlement_months(txns, cards)
 
+    # Remaining-count needs payment history back to each finite series' first_date,
+    # independent of the display window (which may start at `today`). Fetch that once.
+    firsts = [d for d in (_parse_date(r["attributes"].get("first_date")) for r in recs) if d]
+    hist_start = min(firsts + [start]) if firsts else start
+    hist_txns = fetch_transactions(hist_start, end) if hist_start < start else txns
+    hist_settle = _settlement_months(hist_txns, cards)
+
+    # Index real transactions by identifying account for Mechanism A ordered-fill.
+    tx_by_key: dict = defaultdict(list)
+    for t in txns:
+        tx_by_key[_ident_key(t["type"], t["source"], t["destination"])].append(t)
+    for k in tx_by_key:
+        tx_by_key[k].sort(key=lambda x: x["date"])
+
+    def _slug_of(a: dict) -> Optional[str]:
+        s = _norm(a.get("notes"))
+        return s if s.startswith("cmt:") else None
+
+    # Detect identifying accounts shared by >1 Mechanism-A commitment that is NOT
+    # self-identified by a cmt slug: the account rule alone can't disambiguate them
+    # → flag for we-need-to-talk (never guess). Slug-tagged commitments are exempt.
+    keycount: dict = defaultdict(int)
+    for r in recs:
+        a = r["attributes"]; rtype = a.get("type", "withdrawal")
+        if _slug_of(a):
+            continue
+        for tx in a.get("transactions", []):
+            if _norm(tx.get("source_name")) in cards and rtype == "withdrawal":
+                continue  # Mechanism B — no identifying account
+            keycount[_ident_key(rtype, tx.get("source_name"), tx.get("destination_name"))] += 1
+
+    used: set = set()  # txn ids consumed by ordered-fill (one payment clears one occurrence)
     n_total = len(recs)
     n_active = sum(1 for r in recs if r["attributes"].get("active"))
     items: list[dict] = []
@@ -283,6 +413,7 @@ def build_projection(granularity: str = "month",
         if type_filter and rtype != type_filter:
             continue
         title = a.get("title") or a.get("description") or "(untitled)"
+        slug = _slug_of(a)  # a cmt slug may be pinned in the recurrence notes
         occ_dates = _occurrences(a, start, end)
         if not occ_dates:
             continue
@@ -305,16 +436,44 @@ def build_projection(granularity: str = "month",
                     continue
             if currency and cur != currency:
                 continue
-            for d in occ_dates:
-                occ = {"type": rtype, "amount": amt, "source": src,
-                       "destination": dst, "date": d}
-                # Always run the match — it consumes the matched txn (via `used`)
-                # so a later occurrence of the same recurrence can't re-claim it,
-                # even though a confirmed occurrence is dropped below.
-                match = _find_match(occ, txns, used)
-                if match:
+
+            occ_sorted = sorted(occ_dates)
+            is_card = _norm(src) in cards and rtype == "withdrawal"
+            key = _ident_key(rtype, src, dst)
+            flags: list = []
+            if (not is_card) and keycount.get(key, 0) > 1:
+                flags.append("shared_account")   # >1 commitment on one account
+            filled: dict = {}  # occurrence date → matched txn id (None for fatura)
+
+            if is_card:
+                # Mechanism B — an occurrence is settled iff its billing month has a
+                # fatura settlement transfer into the card account.
+                mechanism = "fatura"
+                sm = settle_months.get(_norm(src), set())
+                for d in occ_sorted:
+                    if _ym(d) in sm:
+                        filled[d] = None
+            else:
+                # Mechanism A — ordered-fill: each identifying payment (amount- and
+                # date-blind) clears the earliest still-open occurrence, 1:1.
+                mechanism = "ordered_fill"
+                avail = [t for t in tx_by_key.get(key, [])
+                         if _matches_A(t, rtype, key, slug) and id(t) not in used]
+                # More identifying payments than occurrences, with no cmt slug to
+                # disambiguate → the account is noisy (e.g. ad-hoc payments to a payee
+                # that also has a monthly commitment). Flag for we-need-to-talk.
+                if (not slug) and len(avail) > len(occ_sorted):
+                    flags.append("noisy_account")
+                n = min(len(avail), len(occ_sorted))
+                for d, t in zip(occ_sorted[:n], avail[:n]):
+                    filled[d] = t.get("id")
+                    used.add(id(t))
+
+            remaining = _remaining(a, rtype, src, dst, cards, hist_settle, hist_txns, slug)
+            for d in occ_sorted:
+                if d in filled:
                     status = _DIR.get(rtype, ("paid",))[0]
-                    matched_id = match["id"]
+                    matched_id = filled[d]
                 elif d < today:
                     status = "needs_review"
                     matched_id = None
@@ -325,12 +484,16 @@ def build_projection(granularity: str = "month",
                 # live in Firefly III and are not restated here.
                 if status in _CONFIRMED:
                     continue
-                items.append({
+                item = {
                     "date": d.isoformat(), "title": title, "type": rtype,
                     "amount": amt, "currency": cur, "source": src,
                     "destination": dst, "category": cat, "status": status,
-                    "matched_txn_id": matched_id,
-                })
+                    "matched_txn_id": matched_id, "mechanism": mechanism,
+                    "remaining": remaining,
+                }
+                if flags:
+                    item["flags"] = list(flags)
+                items.append(item)
 
     # aggregate
     periods: dict[str, dict] = {}
