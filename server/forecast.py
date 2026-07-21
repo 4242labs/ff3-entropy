@@ -6,11 +6,17 @@ are projected forward across all three directions — withdrawal / deposit /
 transfer, bounded by first_date / repeat_until / nr_of_repetitions (a finite
 installment stops at N rather than forecasting forever).
 
-An occurrence is marked paid by ACCOUNT, never by amount:
-  • Mechanism A (dedicated account) — ordered-fill: each real payment identified
-    by the commitment's account (or a `cmt:<slug>` tag) clears the earliest still-
-    open occurrence, 1:1. Amount- and date-blind, so variable amounts and late /
-    cross-month payments still count. A shared identifying account → flagged.
+An occurrence is marked settled deterministically, never guessed:
+  • Mechanism A (non-card commitment) — settled by an EXPLICIT PERIOD TAG on the
+    real transaction: `settles:<slug>:<YYYY-MM>`, where `<slug>` is the
+    commitment's human-stable id pinned in its recurrence notes as `cmt:<slug>`,
+    and `<YYYY-MM>` is the month the payment is FOR (not the date it was paid).
+    The engine is a pure lookup: an occurrence for month M is PAID iff a
+    transaction tagged `settles:<slug>:M` exists. Late / advance / lump all encode
+    truth in the tag, decoupled from the payment date, so the verdict is identical
+    at any display-window width. Nothing is inferred: an occurrence with no tag and
+    no acknowledgement, whose date has passed, is `needs_review`; a month knowingly
+    accepted as unpaid carries `ack-gap:<slug>:<M>` and renders `acknowledged_gap`.
   • Mechanism B (credit-card installment) — fatura-driven: an occurrence belongs to
     the billing CYCLE it was charged in, and is settled iff that cycle was paid.
     Installments carry no per-occurrence transaction; they clear in aggregate.
@@ -18,8 +24,11 @@ An occurrence is marked paid by ACCOUNT, never by amount:
     — never computed, because a closing day is an issuer's choice and it moves.
     A card with no cycle rows clears nothing and is flagged `cycle_unknown`.
 
-An occurrence still open once its date has passed is flagged for review — never
-guessed. This module is pure read: it POSTs nothing to Firefly III and marks nothing.
+The two mechanisms are mutually exclusive by construction: a card recurrence never
+enters the tag path (asserted), so an installment can never clear via both a cycle
+and a `settles:` tag. All settlement TAGS are written onto Firefly III by the Alfred
+valet (from a bank statement / fatura, only when the period is certain) — never by
+this engine. This module is pure read: it POSTs nothing and marks nothing.
 """
 from __future__ import annotations
 
@@ -36,7 +45,7 @@ log = logging.getLogger("ff3e.forecast")
 
 FIREFLY_III_URL = os.environ.get("FIREFLY_III_URL", "").rstrip("/")
 FIREFLY_III_TOKEN = os.environ.get("FIREFLY_III_TOKEN", "")
-MATCH_DAYS = int(os.environ.get("MATCH_DAYS", "5"))  # ± window for a match
+MATCH_DAYS = int(os.environ.get("MATCH_DAYS", "5"))  # ± window widening on the fetch
 # Optional: when Firefly III sits behind a Cloudflare Access service auth, these
 # add the service-token headers to every request. Unset → not sent (the common
 # case: a directly reachable Firefly III).
@@ -59,13 +68,13 @@ _DIR = {
     "deposit": ("received", "in"),
     "transfer": ("done", "xfer"),
 }
-# An occurrence that matched a real transaction is CONFIRMED — it already
-# happened and lives in Firefly III. Entropy complements Firefly III (it does
-# not restate it), so a confirmed occurrence is not emitted: the payload is the
-# OUTSTANDING set (upcoming + needs_review) only. The match still runs for every
-# occurrence — it is the only way to know a paused recurrence became a real
-# transaction, and it consumes the matched txn so a later occurrence can't
-# re-claim it — we simply drop the item once it is confirmed.
+# An occurrence that is settled is CONFIRMED — it already happened and lives in
+# Firefly III. Entropy complements Firefly III (it does not restate it), so a
+# confirmed occurrence is not emitted: the payload is the OUTSTANDING set
+# (upcoming + needs_review + acknowledged_gap) only. We simply drop the item once
+# it is confirmed. `acknowledged_gap` is NOT confirmed — a knowingly-unpaid month
+# stays visible (distinct from needs_review) so it is auditable but no longer
+# alarming.
 _CONFIRMED = frozenset(s for s, _ in _DIR.values())  # {"paid", "received", "done"}
 _MN = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -111,7 +120,7 @@ def fetch_recurrences() -> list[dict]:
 
 
 def fetch_transactions(start: dt.date, end: dt.date) -> list[dict]:
-    # widen the fetch by the match window so occurrences near the edges can match
+    # widen the fetch by the match window so settlements near the edges are seen
     s = (start - dt.timedelta(days=MATCH_DAYS)).isoformat()
     e = (end + dt.timedelta(days=MATCH_DAYS)).isoformat()
     rows = _paginate("/api/v1/transactions", {"start": s, "end": e, "limit": 100})
@@ -142,24 +151,75 @@ def _ym(d: dt.date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
 
 
-def _ident_key(rtype: str, src: Optional[str], dst: Optional[str]) -> tuple:
-    """The account that identifies a commitment's payments — never the amount.
-    Withdrawal → its payee (destination); deposit → its payer (source);
-    transfer → the (source, destination) pair."""
-    if rtype == "withdrawal":
-        return ("W", _norm(dst))
-    if rtype == "deposit":
-        return ("D", _norm(src))
-    return ("T", _norm(src), _norm(dst))
+# A commitment's human-stable slug, pinned in its recurrence notes as `cmt:<slug>`.
+# It survives a Bill→recurrence migration (the very event that broke count-based
+# matching) because it is NOT the Firefly recurrence id. The slug is the key half
+# of the settlement tag.
+_CMT_RE = re.compile(r"cmt:([a-z0-9][a-z0-9-]*)", re.IGNORECASE)
+# The settlement tag on a real transaction: the month the payment is FOR.
+_SETTLES_RE = re.compile(r"^settles:([a-z0-9][a-z0-9-]*):(\d{4})-(\d{2})$")
+# A knowingly-accepted unpaid month, pinned in the commitment's notes (a gap has no
+# transaction to carry it) — stops a genuine gap re-flagging forever.
+_ACKGAP_RE = re.compile(r"ack-gap:([a-z0-9][a-z0-9-]*):(\d{4})-(\d{2})", re.IGNORECASE)
 
 
-def _cmt_tag(tags) -> Optional[str]:
-    """The commitment tag `cmt:<slug>` on a transaction, if any — the authoritative
-    identity when an account is shared (a Firefly rule / the accounting agent sets it)."""
-    for t in (tags or []):
-        if isinstance(t, str) and t.lower().startswith("cmt:"):
-            return t.lower()
-    return None
+def _slug_of(rec_attr: dict) -> Optional[str]:
+    """The bare `cmt:` slug from a recurrence's notes (e.g. `rent`), or None."""
+    m = _CMT_RE.search(rec_attr.get("notes") or "")
+    return m.group(1).lower() if m else None
+
+
+def _note_acks(rec_attr: dict) -> set:
+    """Months a commitment's notes acknowledge as genuinely unpaid, as
+    `{(slug, "YYYY-MM"), ...}`. A gap has no payment transaction to carry the tag,
+    so the acknowledgement lives on the commitment itself — written by the valet
+    when the user accepts a month was never paid, so it stops re-flagging forever."""
+    out: set = set()
+    for m in _ACKGAP_RE.finditer(rec_attr.get("notes") or ""):
+        out.add((m.group(1).lower(), f"{m.group(2)}-{m.group(3)}"))
+    return out
+
+
+def _settlement_tags(txns: list[dict]) -> tuple[dict, set]:
+    """Index the explicit settlement tags across all transactions.
+
+    Returns `(settled, conflicts)`:
+      • settled: `{(slug, "YYYY-MM"): txn_id}` — the transaction that settles that
+        commitment-month, deterministically the earliest (iterated oldest-first,
+        then by id).
+      • conflicts: `{(slug, "YYYY-MM"), ...}` — a month claimed by TWO DIFFERENT
+        transactions. The write-side valet tool enforces one settler per month, so a
+        collision is an upstream/backfill bug — the engine refuses to silently pick a
+        winner and surfaces it (`settled_conflict`) rather than clearing the month.
+
+    Acknowledged gaps are NOT read here — a gap has no payment transaction to carry
+    the tag, so its acknowledgement lives on the commitment (`_note_acks`), never on
+    an arbitrary transaction (which would let a stray tag silently mute an alert)."""
+    settled: dict = {}
+    first_id: dict = {}
+    conflicts: set = set()
+    for t in sorted(txns, key=lambda x: (x["date"], str(x.get("id") or ""))):
+        tid = t.get("id")
+        for raw in t.get("tags") or []:
+            m = _SETTLES_RE.match((raw or "").strip().lower())
+            if not m:
+                continue
+            key = (m.group(1), f"{m.group(2)}-{m.group(3)}")
+            if key in first_id:
+                if first_id[key] != tid:      # a different txn also claims this month
+                    conflicts.add(key)
+            else:
+                first_id[key] = tid
+                settled[key] = tid
+    return settled, conflicts
+
+
+def _is_monthly(rec_attr: dict) -> bool:
+    """Mechanism A is monthly by definition. A non-monthly non-card recurrence
+    cannot be keyed by `YYYY-MM` and is flagged rather than silently mis-keyed."""
+    reps = rec_attr.get("repetitions") or []
+    types = {r.get("type") for r in reps}
+    return bool(types) and types <= {"monthly"}
 
 
 def fetch_card_accounts() -> dict:
@@ -303,7 +363,7 @@ def _cycle_of(d: dt.date, cycles: list):
     return None
 
 
-# ---------- occurrence extraction + matching ----------
+# ---------- occurrence extraction ----------
 
 def _parse_date(s: Optional[str]) -> Optional[dt.date]:
     try:
@@ -414,26 +474,15 @@ def _occurrences(rec_attr: dict, start: dt.date, end: dt.date) -> list[dt.date]:
     return [d for d in dates if d >= start]
 
 
-def _matches_A(t: dict, rtype: str, key: tuple, slug: Optional[str]) -> bool:
-    """Does a real transaction belong to this Mechanism-A commitment?
-    With a slug: only the txn tagged `cmt:<slug>`. Without: the identifying account,
-    but NEVER a txn already tagged for some other commitment (a tagged payment is
-    reserved for its own recurrence — an untagged sibling must not steal it)."""
-    if t.get("type") != rtype:
-        return False
-    if slug:
-        return _cmt_tag(t.get("tags")) == slug
-    if _cmt_tag(t.get("tags")) is not None:
-        return False
-    return _ident_key(t.get("type"), t.get("source"), t.get("destination")) == key
-
-
 def _remaining(a: dict, rtype: str, src, dst, cards: dict,
-               hist_settle: dict, hist_txns: list, slug: Optional[str]) -> Optional[int]:
+               hist_settle: dict, settled_idx: dict, slug: Optional[str]) -> Optional[int]:
     """Installments still unpaid across the WHOLE finite series (window-independent):
-    total N minus occurrences already settled, counted from payment history back to
+    total N minus occurrences already settled, counted over the full series back to
     first_date — NOT the display window (which may start at `today`). None for
-    open-ended recurrences."""
+    open-ended recurrences.
+
+    Card series count settled cycles (Mechanism B); non-card series count settled
+    period TAGS (Mechanism A) — never a window- or count-based guess."""
     nrep = a.get("nr_of_repetitions")
     if nrep is None:
         return None
@@ -453,9 +502,10 @@ def _remaining(a: dict, rtype: str, src, dst, cards: dict,
             c = _cycle_of(d, cycles)
             if c is not None and c.close in settled:
                 paid += 1
+    elif slug is None:
+        paid = 0                       # no slug → nothing can be tag-settled
     else:
-        key = _ident_key(rtype, src, dst)
-        paid = min(sum(1 for t in hist_txns if _matches_A(t, rtype, key, slug)), len(full))
+        paid = sum(1 for d in full if (slug, _ym(d)) in settled_idx)
     return max(0, len(full) - paid)
 
 
@@ -483,44 +533,33 @@ def build_projection(granularity: str = "month",
     gran = granularity if granularity in ("day", "month", "year") else "month"
 
     recs = fetch_recurrences()
-    txns = fetch_transactions(start, end)
     cards = fetch_card_accounts()
 
-    # Remaining-count needs payment history back to each finite series' first_date,
-    # independent of the display window (which may start at `today`). Fetch that once.
+    # ONE full-history fetch, unconditional — never the display window. A settlement
+    # tag's payment date is decoupled from the month it settles (late / advance /
+    # lump), so a windowed fetch would miss the settling transaction of an
+    # out-of-window payment — the whole bug class. Fetching [earliest first_date,
+    # max(today, end)] closes it. Read-only; acceptable cost. This single list feeds
+    # BOTH the tag index (Mechanism A) and the settlement list (Mechanism B), so the
+    # two never disagree about what exists.
     firsts = [d for d in (_parse_date(r["attributes"].get("first_date")) for r in recs) if d]
     hist_start = min(firsts + [start]) if firsts else start
-    hist_txns = fetch_transactions(hist_start, end) if hist_start < start else txns
-    # ONE settlement list, built from the widest window and shared by the payload and
-    # the remaining-count. Two lists would disagree about the oldest settlement, and
-    # so about which cycles were ever paid.
-    hist_settle = _settlement_dates(hist_txns, cards)
+    txns = fetch_transactions(hist_start, today)
 
-    # Index real transactions by identifying account for Mechanism A ordered-fill.
-    tx_by_key: dict = defaultdict(list)
-    for t in txns:
-        tx_by_key[_ident_key(t["type"], t["source"], t["destination"])].append(t)
-    for k in tx_by_key:
-        tx_by_key[k].sort(key=lambda x: x["date"])
+    # Mechanism A: explicit settlement-tag index + double-settle conflicts.
+    settled_idx, conflict_idx = _settlement_tags(txns)
+    # Mechanism B: one settlement list, built from the full window and shared by the
+    # payload and the remaining-count.
+    hist_settle = _settlement_dates(txns, cards)
 
-    def _slug_of(a: dict) -> Optional[str]:
-        s = _norm(a.get("notes"))
-        return s if s.startswith("cmt:") else None
-
-    # Detect identifying accounts shared by >1 Mechanism-A commitment that is NOT
-    # self-identified by a cmt slug: the account rule alone can't disambiguate them
-    # → flag for we-need-to-talk (never guess). Slug-tagged commitments are exempt.
-    keycount: dict = defaultdict(int)
+    # A `cmt` slug must identify exactly one commitment. Two recurrences sharing a
+    # slug can't be disambiguated by tag alone → flag both, never cross-settle.
+    slug_counts: dict = defaultdict(int)
     for r in recs:
-        a = r["attributes"]; rtype = a.get("type", "withdrawal")
-        if _slug_of(a):
-            continue
-        for tx in a.get("transactions", []):
-            if _norm(tx.get("source_name")) in cards and rtype == "withdrawal":
-                continue  # Mechanism B — no identifying account
-            keycount[_ident_key(rtype, tx.get("source_name"), tx.get("destination_name"))] += 1
+        s = _slug_of(r["attributes"])
+        if s:
+            slug_counts[s] += 1
 
-    used: set = set()  # txn ids consumed by ordered-fill (one payment clears one occurrence)
     # (card, cycle close) → amount of recurring charges this run considered settled.
     # Confirmed occurrences are dropped from the payload, so without this an
     # over-clear would be invisible; against the fatura total it also reconciles.
@@ -534,7 +573,7 @@ def build_projection(granularity: str = "month",
         if type_filter and rtype != type_filter:
             continue
         title = a.get("title") or a.get("description") or "(untitled)"
-        slug = _slug_of(a)  # a cmt slug may be pinned in the recurrence notes
+        slug = _slug_of(a)  # the cmt slug pinned in the recurrence notes
         occ_dates = _occurrences(a, start, end)
         if not occ_dates:
             continue
@@ -560,16 +599,14 @@ def build_projection(granularity: str = "month",
 
             occ_sorted = sorted(occ_dates)
             is_card = _norm(src) in cards and rtype == "withdrawal"
-            key = _ident_key(rtype, src, dst)
-            flags: list = []
-            if (not is_card) and keycount.get(key, 0) > 1:
-                flags.append("shared_account")   # >1 commitment on one account
-            filled: dict = {}  # occurrence date → the txn that accounts for it
-            unknown_cycle: set = set()  # occurrences no cycle row covers
+            filled: dict = {}          # occurrence date → the txn that settles it
+            acked: set = set()         # occurrence dates acknowledged as unpaid
+            occ_flags: dict = defaultdict(list)  # per-occurrence flags
 
             if is_card:
                 # Mechanism B — an occurrence belongs to the cycle it was charged in,
-                # and is settled iff that cycle's fatura was paid.
+                # and is settled iff that cycle's fatura was paid. The tag path is
+                # never consulted here: an installment cannot clear via a tag.
                 mechanism = "fatura"
                 cycles = cards.get(_norm(src)) or []
                 settled = _settled_cycles(cycles, hist_settle.get(_norm(src), []))
@@ -580,36 +617,50 @@ def build_projection(granularity: str = "month",
                     # the end of the table must not cast doubt on its own past.
                     c = _cycle_of(d, cycles) if cycles else None
                     if c is None:
-                        unknown_cycle.add(d)
+                        occ_flags[d].append("cycle_unknown")
                     elif c.close in settled:
                         filled[d] = settled[c.close]
                         cleared[(_norm(src), c.close)] += amt
             else:
-                # Mechanism A — ordered-fill: each identifying payment (amount- and
-                # date-blind) clears the earliest still-open occurrence, 1:1.
-                mechanism = "ordered_fill"
-                avail = [t for t in tx_by_key.get(key, [])
-                         if _matches_A(t, rtype, key, slug) and id(t) not in used]
-                # More identifying payments than occurrences, with no cmt slug to
-                # disambiguate → the account is noisy (e.g. ad-hoc payments to a payee
-                # that also has a monthly commitment). Flag for we-need-to-talk.
-                if (not slug) and len(avail) > len(occ_sorted):
-                    flags.append("noisy_account")
-                # Only auto-clear when attribution is unambiguous. A flagged account
-                # (shared or noisy) can't be cleanly attributed, so leave its
-                # occurrences OPEN — they surface for we-need-to-talk rather than being
-                # silently marked paid and dropped from the outstanding set.
-                if not flags:
-                    n = min(len(avail), len(occ_sorted))
-                    for d, t in zip(occ_sorted[:n], avail[:n]):
-                        filled[d] = t.get("id")
-                        used.add(id(t))
+                # Mechanism A — deterministic tag lookup. An occurrence for month M is
+                # PAID iff a transaction is tagged `settles:<slug>:M`; otherwise it is
+                # acknowledged (ack-gap), needs_review, or upcoming. Nothing inferred.
+                assert not is_card, "tag path must never run for a card recurrence"
+                mechanism = "tag"
+                monthly = _is_monthly(a)
+                note_ack = _note_acks(a)
+                dup_slug = slug is not None and slug_counts.get(slug, 0) > 1
+                for d in occ_sorted:
+                    month = _ym(d)
+                    if slug is None:
+                        # A non-card commitment without a cmt slug cannot be keyed —
+                        # a build precondition, surfaced (never guessed, never paid).
+                        occ_flags[d].append("missing_slug")
+                    elif not monthly:
+                        # Mechanism A is monthly by definition; anything else can't be
+                        # keyed by YYYY-MM → surfaced, never silently mis-keyed.
+                        occ_flags[d].append("non_monthly")
+                    elif dup_slug:
+                        # Slug shared by >1 commitment → ambiguous → surfaced, never
+                        # cross-settled.
+                        occ_flags[d].append("duplicate_slug")
+                    elif (slug, month) in conflict_idx:
+                        # Two transactions claim this month → refuse to pick a winner.
+                        occ_flags[d].append("settled_conflict")
+                    elif (slug, month) in settled_idx:
+                        filled[d] = settled_idx[(slug, month)]
+                    elif (slug, month) in note_ack:
+                        acked.add(d)
 
-            remaining = _remaining(a, rtype, src, dst, cards, hist_settle, hist_txns, slug)
+            remaining = _remaining(a, rtype, src, dst, cards,
+                                   hist_settle, settled_idx, slug)
             for d in occ_sorted:
                 if d in filled:
                     status = _DIR.get(rtype, ("paid",))[0]
                     matched_id = filled[d]
+                elif d in acked:
+                    status = "acknowledged_gap"
+                    matched_id = None
                 elif d < today:
                     status = "needs_review"
                     matched_id = None
@@ -627,9 +678,8 @@ def build_projection(granularity: str = "month",
                     "matched_txn_id": matched_id, "mechanism": mechanism,
                     "remaining": remaining,
                 }
-                item_flags = flags + (["cycle_unknown"] if d in unknown_cycle else [])
-                if item_flags:
-                    item["flags"] = item_flags
+                if occ_flags.get(d):
+                    item["flags"] = list(occ_flags[d])
                 items.append(item)
 
     # aggregate

@@ -16,14 +16,24 @@ sys.modules.setdefault("httpx", types.SimpleNamespace(
 import forecast as f  # noqa: E402
 
 
-def _rec(title, rtype, moment, amount, src, dst, first, nr=None, notes=None, cur="BRL"):
+def _rec(title, rtype, moment, amount, src, dst, first, nr=None, notes=None, cur="BRL",
+         rep_type="monthly"):
     return {"attributes": {
         "active": False, "type": rtype, "title": title, "notes": notes,
         "first_date": first, "repeat_until": None, "nr_of_repetitions": nr,
-        "repetitions": [{"type": "monthly", "moment": str(moment), "skip": 0}],
+        "repetitions": [{"type": rep_type, "moment": str(moment), "skip": 0}],
         "transactions": [{"amount": str(amount), "currency_code": cur,
                           "source_name": src, "destination_name": dst,
                           "category_name": None}]}}
+
+
+def _txn(tid, date, dst, tags=(), src="bank", amount=1000.0,
+         rtype="withdrawal", cur="BRL"):
+    """A real Mechanism-A payment. `tags` carries the explicit period tag(s)
+    `settles:<slug>:<YYYY-MM>` that attribute it to the month(s) it is FOR."""
+    return {"id": tid, "type": rtype, "date": dt.date.fromisoformat(date),
+            "amount": amount, "currency": cur, "source": src,
+            "destination": dst, "description": "x", "tags": list(tags)}
 
 
 def _cycles(*pairs):
@@ -70,24 +80,380 @@ def test_nr_counts_from_first_not_window():
     assert [d.isoformat() for d in occ] == ["2026-04-09"]
 
 
-def test_ordered_fill_confirmed_dropped_outstanding_kept(monkeypatch):
-    """Ordered-fill: two payments clear the two earliest occurrences (dropped from
-    the outstanding payload); later months remain needs_review/upcoming."""
+def _wire_ranged(monkeypatch, recs, txns, cards=None):
+    """Like `_wire`, but `fetch_transactions` HONORS its [start, end] arguments —
+    so a test can prove the engine fetches full history (not the display window):
+    an out-of-display-window settling txn is only seen if the engine widened the
+    fetch to the series' first_date."""
+    monkeypatch.setattr(f, "fetch_recurrences", lambda: recs)
+    monkeypatch.setattr(f, "fetch_transactions",
+                        lambda s, e: [t for t in txns if s <= t["date"] <= e])
+    monkeypatch.setattr(f, "fetch_card_accounts",
+                        lambda: {f._norm(k): v for k, v in (cards or {}).items()})
+
+
+# ---------- Mechanism A: deterministic settlement by explicit period tag ----------
+
+def test_tag_settles_exactly_its_month(monkeypatch):
+    """Use case 1 (on-time). A `settles:rent:2026-06` tag clears June — dropped
+    from the outstanding set, and attributed to the real txn. Untagged neighbours
+    stay open; no count, no window heuristic."""
     today = dt.date(2026, 7, 12)
-    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord", "2026-01-05")]
-    txns = [{"id": "a", "type": "withdrawal", "date": dt.date(2026, 6, 30),
-             "amount": 950.0, "currency": "BRL", "source": "bank",
-             "destination": "LANDLORD", "description": "r", "tags": []},
-            {"id": "b", "type": "withdrawal", "date": dt.date(2026, 7, 3),
-             "amount": 1100.0, "currency": "BRL", "source": "Bank",
-             "destination": "Landlord", "description": "r", "tags": []}]
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-05-05", notes="cmt:rent")]
+    txns = [_txn("t1", "2026-06-07", "Landlord", tags=["settles:rent:2026-06"])]
     _wire(monkeypatch, recs, txns)
     res = f.build_projection(granularity="month", start=dt.date(2026, 5, 1),
                              end=dt.date(2026, 8, 31), today=today)
     out = _outstanding(res)
-    assert "2026-05-05" not in out and "2026-06-05" not in out   # paid → dropped
+    assert "2026-06-05" not in out                          # tagged → paid → dropped
+    assert out["2026-05-05"]["status"] == "needs_review"    # untagged, past
     assert out["2026-07-05"]["status"] == "needs_review"
     assert out["2026-08-05"]["status"] == "upcoming"
+    assert out["2026-05-05"]["mechanism"] == "tag"
+
+
+def test_paid_occurrence_carries_the_settling_txn_id(monkeypatch):
+    """A settled month is dropped from the payload, but a partly-settled series still
+    shows the neighbour; the paid one's attribution is recoverable via the tag index."""
+    today = dt.date(2026, 7, 12)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-06-05", notes="cmt:rent")]
+    txns = [_txn("txn-1", "2026-06-07", "Landlord",
+                 tags=["settles:rent:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    settled, _ = f._settlement_tags(txns)
+    assert settled[("rent", "2026-06")] == "txn-1"    # attributable, auditable
+
+
+def test_late_payment_tag_credits_the_intended_month(monkeypatch):
+    """Use case 2 (late). Paid 2026-07-20 but tagged for June → June paid, July still
+    open. The payment date is irrelevant; the tag is the truth."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 15, 1000, "Bank", "Landlord",
+                 "2026-06-15", notes="cmt:rent")]
+    txns = [_txn("late", "2026-07-20", "Landlord", tags=["settles:rent:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert "2026-06-15" not in out                          # late payment, June paid
+    assert out["2026-07-15"]["status"] == "needs_review"    # not falsely paid
+
+
+def test_advance_payment_tag_credits_the_future_month(monkeypatch):
+    """Use case 3 (advance). Paid 2026-06-20 but tagged for July → July paid in
+    advance, June untouched."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 15, 1000, "Bank", "Landlord",
+                 "2026-06-15", notes="cmt:rent")]
+    txns = [_txn("adv", "2026-06-20", "Landlord", tags=["settles:rent:2026-07"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert "2026-07-15" not in out                          # advance → July paid
+    assert out["2026-06-15"]["status"] == "needs_review"
+
+
+def test_lump_payment_settles_every_tagged_month(monkeypatch):
+    """Use case 9 (lump). One txn carrying three `settles:` tags clears three months,
+    each attributed to that same txn."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Pension", "transfer", 10, 500, "Bank", "XP",
+                 "2026-05-10", notes="cmt:pension")]
+    txns = [_txn("lump", "2026-05-10", "XP", src="bank", rtype="transfer",
+                 tags=["settles:pension:2026-05", "settles:pension:2026-06",
+                       "settles:pension:2026-07"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 5, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert set(out) == {"2026-08-10"}                       # only the untagged month
+    settled, _ = f._settlement_tags(txns)
+    assert settled[("pension", "2026-06")] == "lump"
+
+
+def test_variable_amount_is_settlement_blind(monkeypatch):
+    """Use case 4. A tag settles regardless of amount — the amount check is a
+    WRITE-side concern (the valet tool), never a read-side gate here."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Power", "withdrawal", 8, 300, "Bank", "PowerCo",
+                 "2026-06-08", notes="cmt:power")]
+    txns = [_txn("v", "2026-06-08", "PowerCo", amount=812.55,
+                 tags=["settles:power:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    assert "2026-06-08" not in _outstanding(res)            # settled despite amount
+
+
+def test_migrated_recurrence_old_payments_never_poison(monkeypatch):
+    """Use case 5 — the live bug. A recurrence whose first_date is a recent migration
+    date has real payee history predating it. Those old payments are not occurrences,
+    are never scanned, and cannot poison the verdict. Only the tagged month clears."""
+    today = dt.date(2026, 7, 12)
+    recs = [_rec("Rent", "withdrawal", 10, 5900, "Bank", "Landlord",
+                 "2026-06-10", notes="cmt:rent")]
+    # six untagged pre-migration payments + one tagged June payment
+    txns = [_txn(f"old{m}", f"2026-{m:02d}-07", "Landlord") for m in range(1, 7)]
+    txns.append(_txn("jun", "2026-06-07", "Landlord",
+                     tags=["settles:rent:2026-06"]))
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 7, 31), today=today)
+    out = _outstanding(res)
+    assert "2026-06-10" not in out                          # June tagged → paid
+    assert out["2026-07-10"]["status"] == "needs_review"    # untagged, past
+    assert not any("noisy" in fl for it in out.values() for fl in it.get("flags", []))
+
+
+def test_ad_hoc_noise_cannot_fabricate_a_clear(monkeypatch):
+    """Use case 6. Many small untagged Pix to a payee that also holds a monthly
+    commitment. Without a tag, nothing clears — the noise is simply ignored."""
+    today = dt.date(2026, 8, 1)
+    recs = [_rec("Housekeeper", "withdrawal", 5, 1100, "Bank", "Maria",
+                 "2026-06-05", notes="cmt:cleaning")]
+    txns = [_txn(f"pix{i}", f"2026-06-{5 + i:02d}", "Maria", amount=50.0)
+            for i in range(5)]                               # untagged noise
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-05"]["status"] == "needs_review"    # not silently paid
+    assert out["2026-07-05"]["status"] == "needs_review"
+
+
+def test_genuine_gap_names_the_exact_month(monkeypatch):
+    """Use case 7. A never-paid month is needs_review on THAT month — not the latest,
+    not a count. Every other month with a tag clears."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-05-05", notes="cmt:rent")]
+    txns = [_txn("may", "2026-05-06", "Landlord", tags=["settles:rent:2026-05"]),
+            _txn("jul", "2026-07-06", "Landlord", tags=["settles:rent:2026-07"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 5, 1),
+                             end=dt.date(2026, 7, 31), today=today)
+    out = _outstanding(res)
+    assert set(out) == {"2026-06-05"}                       # exactly the gap month
+    assert out["2026-06-05"]["status"] == "needs_review"
+
+
+def test_acknowledged_gap_stops_reflagging(monkeypatch):
+    """Use case 7 (accepted). A gap the user accepted carries `ack-gap:slug:M` in the
+    commitment notes → status `acknowledged_gap`, distinct from needs_review, and no
+    longer alarming. It is not confirmed, so it stays visible/auditable."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord", "2026-05-05",
+                 notes="cmt:rent\nack-gap:rent:2026-06")]
+    txns = [_txn("may", "2026-05-06", "Landlord", tags=["settles:rent:2026-05"]),
+            _txn("jul", "2026-07-06", "Landlord", tags=["settles:rent:2026-07"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 5, 1),
+                             end=dt.date(2026, 7, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-05"]["status"] == "acknowledged_gap"
+    assert "flags" not in out["2026-06-05"]                 # not an error state
+
+
+def test_two_commitments_one_payee_kept_distinct(monkeypatch):
+    """Use case 8. Two commitments to the same payee carry different slugs → different
+    tags → never confused."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-06-05", notes="cmt:rent"),
+            _rec("Garage", "withdrawal", 5, 200, "Bank", "Landlord",
+                 "2026-06-05", notes="cmt:garagem")]
+    txns = [_txn("rent", "2026-06-06", "Landlord", tags=["settles:rent:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    out = _outstanding(res)
+    titles = {it["title"] for it in out.values()}
+    assert titles == {"Garage"}                             # rent paid, garage open
+
+
+def test_future_occurrence_is_upcoming_never_auto_settled(monkeypatch):
+    """Use case 14. An occurrence dated on/after today with no tag is `upcoming`,
+    never paid, never needs_review — the split is a calendar fact."""
+    today = dt.date(2026, 7, 12)
+    recs = [_rec("iCloud", "withdrawal", 24, 15, "Bank", "Apple",
+                 "2026-06-24", notes="cmt:icloud")]
+    txns = []
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-24"]["status"] == "needs_review"    # past, untagged
+    assert out["2026-07-24"]["status"] == "upcoming"        # >= today
+    assert out["2026-08-24"]["status"] == "upcoming"
+
+
+def test_missing_slug_is_surfaced_never_paid(monkeypatch):
+    """A non-card commitment with no `cmt:` slug cannot be keyed. It is flagged
+    `missing_slug` and left open — a build precondition, surfaced, never guessed."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord", "2026-06-05")]
+    txns = [_txn("t", "2026-06-06", "Landlord", tags=["settles:rent:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-05"]["flags"] == ["missing_slug"]
+    assert out["2026-06-05"]["status"] == "needs_review"
+
+
+def test_non_monthly_non_card_is_surfaced_never_paid(monkeypatch):
+    """A weekly (non-monthly) non-card recurrence can't be keyed by YYYY-MM → flagged
+    `non_monthly`, never silently mis-keyed."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Odd", "withdrawal", 1, 100, "Bank", "Someone", "2026-07-06",
+                 notes="cmt:odd", rep_type="weekly")]
+    _wire(monkeypatch, recs, [])
+    res = f.build_projection(granularity="month", start=dt.date(2026, 7, 1),
+                             end=dt.date(2026, 7, 20), today=today)
+    out = _outstanding(res)
+    assert out and all(it["flags"] == ["non_monthly"] for it in out.values())
+
+
+def test_full_history_fetch_sees_out_of_window_settler(monkeypatch):
+    """The root fix. July's occurrence is settled by a txn dated in JANUARY (an
+    advance, tagged for July). The display window is July only. The engine must fetch
+    full history (back to first_date), not the display window, or it misses the
+    settling txn and falsely flags July. `_wire_ranged` honours the fetch bounds, so
+    this only passes if the engine widened the fetch."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 15, 1000, "Bank", "Landlord",
+                 "2026-01-15", notes="cmt:rent")]
+    txns = [_txn("adv", "2026-01-20", "Landlord", tags=["settles:rent:2026-07"])]
+    _wire_ranged(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 7, 1),
+                             end=dt.date(2026, 7, 31), today=today)
+    assert "2026-07-15" not in _outstanding(res)            # January txn was found
+
+
+def test_verdict_is_window_independent(monkeypatch):
+    """A shared occurrence's verdict is identical in a narrow and a wide DISPLAY
+    window — the whole point. Run both, diff the overlap → ∅."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 15, 1000, "Bank", "Landlord",
+                 "2026-01-15", notes="cmt:rent")]
+    txns = [_txn("jun", "2026-06-16", "Landlord", tags=["settles:rent:2026-06"])]
+    _wire_ranged(monkeypatch, recs, txns)
+    narrow = _outstanding(f.build_projection(
+        granularity="month", start=dt.date(2026, 6, 1),
+        end=dt.date(2026, 7, 31), today=today))
+    wide = _outstanding(f.build_projection(
+        granularity="month", start=dt.date(2023, 1, 1),
+        end=dt.date(2026, 12, 31), today=today))
+    shared = set(narrow) & set(wide)
+    assert "2026-06-15" not in shared                       # paid in both → dropped
+    assert shared                                           # e.g. 2026-07-15
+    for k in shared:
+        assert narrow[k]["status"] == wide[k]["status"]     # diff == ∅
+
+
+def test_card_recurrence_ignores_a_stray_settles_tag(monkeypatch):
+    """Mechanism-B isolation, enforced by construction: a `settles:` tag on a card
+    installment is never consulted — the tag path does not run for a card recurrence.
+    Only the cycle settles it."""
+    today = dt.date(2026, 7, 21)
+    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15",
+                 nr=2, notes="cmt:parc")]
+    # a stray tag that WOULD clear June if the tag path (wrongly) ran for a card
+    txns = [{"id": "stray", "type": "withdrawal", "date": dt.date(2026, 6, 15),
+             "amount": 300.0, "currency": "BRL", "source": "Itaucard",
+             "destination": "Store", "description": "x",
+             "tags": ["settles:parc:2026-06"]}]
+    cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
+    _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-15"]["mechanism"] == "fatura"       # B, not tag
+    assert out["2026-06-15"]["status"] == "needs_review"    # tag ignored, cycle unpaid
+
+
+def test_double_settle_is_flagged_not_silently_cleared(monkeypatch):
+    """Use case 11 (overpayment / duplicate). Two DIFFERENT transactions both tag the
+    same month → the engine refuses to pick a winner: `settled_conflict`, left open,
+    surfaced. It never silently clears one and drops the month."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-06-05", notes="cmt:rent")]
+    txns = [_txn("a", "2026-06-06", "Landlord", tags=["settles:rent:2026-06"]),
+            _txn("b", "2026-06-20", "Landlord", tags=["settles:rent:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-05"]["flags"] == ["settled_conflict"]
+    assert out["2026-06-05"]["status"] == "needs_review"    # not dropped
+
+
+def test_same_txn_repeated_tag_is_idempotent_not_a_conflict(monkeypatch):
+    """One transaction carrying the same tag twice is dedupe, not a double-settle."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-06-05", notes="cmt:rent")]
+    txns = [_txn("a", "2026-06-06", "Landlord",
+                 tags=["settles:rent:2026-06", "settles:rent:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    assert "2026-06-05" not in _outstanding(res)            # settled, no conflict
+
+
+def test_duplicate_slug_across_commitments_is_flagged(monkeypatch):
+    """A `cmt` slug shared by two commitments is ambiguous — a payment for one would
+    otherwise cross-settle the other. Both are flagged `duplicate_slug`, never
+    cleared, even when a matching tag exists."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "Landlord",
+                 "2026-06-05", notes="cmt:dup"),
+            _rec("Power", "withdrawal", 8, 300, "Bank", "PowerCo",
+                 "2026-06-08", notes="cmt:dup")]
+    txns = [_txn("t", "2026-06-06", "Landlord", tags=["settles:dup:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-05"]["flags"] == ["duplicate_slug"]
+    assert out["2026-06-08"]["flags"] == ["duplicate_slug"]
+    assert out["2026-06-05"]["status"] == "needs_review"    # not cross-settled
+
+
+def test_remaining_counts_tagged_months_for_finite_non_card_series(monkeypatch):
+    """`_remaining` on a finite NON-card series is tag-derived: N minus tagged months,
+    window-independent — not a count- or ordered-fill guess."""
+    today = dt.date(2026, 8, 1)
+    recs = [_rec("Plan", "withdrawal", 10, 200, "Bank", "Gym",
+                 "2026-05-10", nr=3, notes="cmt:gym")]
+    txns = [_txn("m", "2026-05-10", "Gym", tags=["settles:gym:2026-05"]),
+            _txn("j", "2026-06-10", "Gym", tags=["settles:gym:2026-06"])]
+    _wire(monkeypatch, recs, txns)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 5, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert set(out) == {"2026-07-10"}                       # only the untagged month
+    assert out["2026-07-10"]["remaining"] == 1              # 3 − 2 tagged
+
+
+def test_card_verdict_holds_under_bound_honoring_fetch(monkeypatch):
+    """Mechanism-B regression guard: the widened full-history fetch (now ceilinged at
+    `today`, not the display `end`) must not corrupt the card path. Here the display
+    window ENDS 30/06 but the June-charge's fatura is paid late on 20/07 — the engine
+    must fetch past `end` to `today` and clear it, exactly as window-independence for
+    A does. Uses the bound-honoring stub, so a display-window fetch would fail this."""
+    today = dt.date(2026, 7, 25)
+    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=2)]
+    cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
+    txns = [_settlement("late", "2026-07-20", "Itaucard")]
+    _wire_ranged(monkeypatch, recs, txns, cards={"Itaucard": cycles})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
+    assert "2026-06-15" not in _outstanding(res)            # cleared via late fatura
 
 
 def test_fatura_clears_the_cycle_a_charge_fell_in(monkeypatch):
@@ -223,23 +589,6 @@ def test_parse_cycles_reads_notes_and_ignores_rubbish():
         "some other note\n")
     assert [c.close.isoformat() for c in cycles] == ["2026-06-10", "2026-07-13"]
     assert cycles[1].total == 26139.84 and cycles[0].total is None
-
-
-def test_noisy_account_surfaces_not_silently_cleared(monkeypatch):
-    """A noisy account (more identifying payments than occurrences, no slug) must NOT
-    be auto-cleared and dropped — its occurrences stay open, flagged, for review."""
-    today = dt.date(2026, 8, 1)
-    recs = [_rec("Housekeeper", "withdrawal", 5, 1100, "Bank", "Maria", "2026-06-05")]
-    txns = [{"id": f"t{i}", "type": "withdrawal", "date": dt.date(2026, 6, 5 + i),
-             "amount": 50.0, "currency": "BRL", "source": "bank", "destination": "MARIA",
-             "description": "pix", "tags": []} for i in range(5)]   # 5 txns > 3 occ
-    _wire(monkeypatch, recs, txns)
-    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
-                             end=dt.date(2026, 8, 31), today=today)
-    out = _outstanding(res)
-    assert out, "flagged commitment must not vanish from the outstanding set"
-    assert all(it.get("flags") == ["noisy_account"] for it in out.values())
-    assert out["2026-06-05"]["status"] == "needs_review"   # not silently 'paid'
 
 
 def test_non_fatura_transfer_does_not_clear(monkeypatch):
