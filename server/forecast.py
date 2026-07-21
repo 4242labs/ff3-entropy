@@ -17,18 +17,25 @@ An occurrence is marked settled deterministically, never guessed:
     at any display-window width. Nothing is inferred: an occurrence with no tag and
     no acknowledgement, whose date has passed, is `needs_review`; a month knowingly
     accepted as unpaid carries `ack-gap:<slug>:<M>` and renders `acknowledged_gap`.
-  • Mechanism B (credit-card installment) — fatura-driven: an occurrence belongs to
-    the billing CYCLE it was charged in, and is settled iff that cycle was paid.
-    Installments carry no per-occurrence transaction; they clear in aggregate.
-    A cycle is a (close, due) pair read from the card account's notes in Firefly III
-    — never computed, because a closing day is an issuer's choice and it moves.
-    A card with no cycle rows clears nothing and is flagged `cycle_unknown`.
+  • Mechanism B (credit-card installment) — DERIVED FROM THE BOOKED CHARGES, which are
+    the single source of truth. A parcelado charge lives in the ledger the moment it is
+    billed (a real withdrawal on the card, dated on the statement, carrying its own
+    `installment N/M`). Entropy keeps NO parallel recurrence for it: it reads the latest
+    parcela of each active plan off the last closed statement (plus brand-new plans off
+    the open one) and projects only the UNBILLED tail N+1..M forward onto the coming
+    statement dates. A charge already in the ledger is never also projected, so an
+    installment can never be counted twice. The parcela's total M and number N come from
+    the charge (a `installment:<total>:<current>` tag, or the issuer's description text)
+    — never inferred; a plan whose total is unknown projects nothing. Future statement
+    dates come from the card's cycle rows (close/due pairs in its notes, never computed);
+    past the last issued statement the tail falls monthly and is flagged
+    `cycle_projected`. See `_card_installments`. (Open-ended card charges — a monthly
+    subscription with no finite N — are still recurrences and still clear against a paid
+    cycle; only FINITE installments are derived from the ledger.)
 
-The two mechanisms are mutually exclusive by construction: a card recurrence never
-enters the tag path (asserted), so an installment can never clear via both a cycle
-and a `settles:` tag. All settlement TAGS are written onto Firefly III by the Alfred
-valet (from a bank statement / fatura, only when the period is certain) — never by
-this engine. This module is pure read: it POSTs nothing and marks nothing.
+Mechanism A settlement TAGS are written onto Firefly III by the Alfred valet (from a
+bank statement, only when the period is certain) — never by this engine. This module is
+pure read: it POSTs nothing and marks nothing.
 """
 from __future__ import annotations
 
@@ -46,6 +53,10 @@ log = logging.getLogger("ff3e.forecast")
 FIREFLY_III_URL = os.environ.get("FIREFLY_III_URL", "").rstrip("/")
 FIREFLY_III_TOKEN = os.environ.get("FIREFLY_III_TOKEN", "")
 MATCH_DAYS = int(os.environ.get("MATCH_DAYS", "5"))  # ± window widening on the fetch
+# A date far enough ahead to regenerate a whole finite installment series (it is
+# truncated by nr_of_repetitions, so the horizon only has to exceed the last
+# occurrence) when numbering installments 1..N regardless of the display window.
+_FAR_HORIZON = dt.date(2100, 1, 1)
 # Optional: when Firefly III sits behind a Cloudflare Access service auth, these
 # add the service-token headers to every request. Unset → not sent (the common
 # case: a directly reachable Firefly III).
@@ -136,6 +147,7 @@ def fetch_transactions(start: dt.date, end: dt.date) -> list[dict]:
                 "amount": abs(float(t.get("amount") or 0)),
                 "currency": t.get("currency_code"),
                 "source": t.get("source_name"), "destination": t.get("destination_name"),
+                "category": t.get("category_name"),
                 "description": t.get("description"), "tags": t.get("tags") or [],
             })
     return flat
@@ -161,6 +173,33 @@ _SETTLES_RE = re.compile(r"^settles:([a-z0-9][a-z0-9-]*):(\d{4})-(\d{2})$")
 # A knowingly-accepted unpaid month, pinned in the commitment's notes (a gap has no
 # transaction to carry it) — stops a genuine gap re-flagging forever.
 _ACKGAP_RE = re.compile(r"ack-gap:([a-z0-9][a-z0-9-]*):(\d{4})-(\d{2})", re.IGNORECASE)
+
+# A credit-card installment's parcela number, carried by the REAL booked charge —
+# the single source of truth for card installments (Mechanism B). Preferred form is
+# an explicit tag `installment:<total>:<current>` (e.g. `installment:12:10` = the
+# 10th of 12); the free-text `installment N/M` / `Parcela N/M` the issuer prints in
+# the description is the fallback. A charge that states neither is an ordinary one-off
+# and is never projected.
+_INST_TAG_RE = re.compile(r"^installment:(\d+):(\d+)$", re.IGNORECASE)  # total:current
+_INST_DESC_RE = re.compile(r"(?:installment|parcela)\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+
+
+def _installment_of(t: dict) -> Optional[tuple]:
+    """`(current, total)` for a booked installment charge, or None. Tag wins over the
+    description. Rejects nonsense (total < 1, current out of 1..total) rather than
+    forecasting from a garbled marker."""
+    for raw in t.get("tags") or []:
+        m = _INST_TAG_RE.match((raw or "").strip())
+        if m:
+            total, cur = int(m.group(1)), int(m.group(2))
+            if total >= 1 and 1 <= cur <= total:
+                return cur, total
+    m = _INST_DESC_RE.search(t.get("description") or "")
+    if m:
+        cur, total = int(m.group(1)), int(m.group(2))
+        if total >= 1 and 1 <= cur <= total:
+            return cur, total
+    return None
 
 
 def _slug_of(rec_attr: dict) -> Optional[str]:
@@ -517,6 +556,161 @@ def _period_key(d: dt.date, gran: str) -> tuple[str, str]:
     return f"{d.year}-{d.month:02d}", f"{_MN[d.month]} {d.year}"  # month default
 
 
+# ---------- card installments (Mechanism B, derived from the booked charges) ----------
+#
+# A credit-card installment lives in the ledger the moment it is charged: the real
+# withdrawal, dated on the statement, carrying its own parcela number. Entropy does
+# NOT keep a parallel recurrence for it — that second copy fired on a different day,
+# fell into a different billing cycle, and double-counted the current month. Instead
+# the forecast is a pure function of the booked charges: read the latest parcela of
+# each active plan and project only the UNBILLED tail. A charge already in the ledger
+# is never also projected, so an installment cannot be counted twice.
+
+
+def _cycle_index(d: dt.date, cycles: list) -> Optional[int]:
+    """Index (into `cycles`) of the statement a charge dated `d` was billed in — the
+    row whose close equals `d`, else the cycle it falls into, else (a charge past the
+    table's end) the last row so the tail extends monthly from there. None only when
+    there are no cycles at all."""
+    for i, c in enumerate(cycles):
+        if c.close == d:
+            return i
+    c = _cycle_of(d, cycles)
+    if c is not None:
+        return cycles.index(c)
+    if cycles and d > cycles[-1].close:
+        return len(cycles) - 1
+    return None
+
+
+def _clean_title(desc: Optional[str]) -> str:
+    """Merchant name for display: the description with its `(installment …)` /
+    `(Parcela …)` parenthetical stripped."""
+    s = re.sub(r"\s*\((?:installment|parcela)[^)]*\)", "", desc or "", flags=re.IGNORECASE)
+    return s.strip() or (desc or "(untitled)").strip()
+
+
+def _latest_statement_charges(charges: list, cycles: list, today: dt.date) -> list:
+    """The booked installment charges of a card's MOST RECENT closed statement.
+
+    A plan bills exactly once per statement, so this is ONE charge per active plan at
+    its current parcela — with no identity guess and no dedup. Multiplicity is
+    preserved (three identical `8/12` charges are three plans), distinct equal-amount
+    plans stay distinct, and — because a plan's *next* parcela always lands on a LATER
+    statement — a booked parcela is never also projected. The no-double-count guarantee
+    is structural, not a heuristic match: we simply never look at more than one
+    statement, and each plan's earlier parcelas live in earlier statements we don't read.
+
+    Charges within the table are bucketed by the CYCLE they fall in (`_cycle_index`), and
+    we take the latest closed cycle that actually HAS charges — so a stale row whose
+    charges arrived first falls back to the last statement that was booked, rather than
+    showing nothing. Charges dated after the table's end are handled above as the newest
+    statement. (Charges must be booked on the statement's CLOSING date, as the fatura
+    prints them — a charge booked on the due day lands in the next cycle's interval and
+    would be read one statement stale; the reconcile skill mandates close-date booking.)
+
+    With no cycle rows the statement boundary is unknown: best-effort is the last ~31
+    days of charges (every projection is flagged `cycle_projected` downstream). A plan
+    billing twice inside that span is the one case this degenerate path can double-count."""
+    if not cycles:
+        lo = today - dt.timedelta(days=31)
+        return [c for c in charges if lo < c["date"] <= today]
+    # A newer statement whose cycle row hasn't been ingested yet: its charges are dated
+    # AFTER the last known close (the fatura pipeline lags the transaction feed). Those
+    # charges ARE the current statement — take them as their own date cluster, never fold
+    # them into the last table row, which would merge two statements into one bucket and
+    # re-project the already-booked current parcela.
+    post = [c for c in charges if c["date"] > cycles[-1].close]
+    if post:
+        dmax = max(c["date"] for c in post)
+        return [c for c in post if c["date"] > dmax - dt.timedelta(days=25)]
+    buckets: dict = defaultdict(list)
+    for c in charges:
+        ci = _cycle_index(c["date"], cycles)
+        if ci is not None:
+            buckets[ci].append(c)
+    for i in sorted((i for i, cyc in enumerate(cycles) if cyc.close <= today),
+                    reverse=True):
+        if buckets.get(i):
+            return buckets[i]
+    return []
+
+
+def _card_installments(txns: list, cards: dict, today: dt.date,
+                       start: dt.date, end: dt.date,
+                       type_filter: Optional[str], category: Optional[str],
+                       account: Optional[str], currency: Optional[str]) -> list:
+    """Future card installments derived from the booked charges — the single source
+    of truth. Per card, the last CLOSED statement shows every active plan exactly once
+    at its current parcela N of M (multiplicity preserved — three identical plans are
+    three charges); the still-open statement adds brand-new plans. We project only
+    parcelas N+1..M forward onto the coming statement dates. Nothing is guessed: a plan
+    with no total, or a card the marker never appears on, yields no projection."""
+    if type_filter and type_filter != "withdrawal":
+        return []                       # installments are withdrawals only
+    per_card: dict = defaultdict(list)
+    for t in txns:
+        if t.get("type") != "withdrawal":
+            continue
+        src = _norm(t.get("source"))
+        if src not in cards:
+            continue
+        nm = _installment_of(t)
+        if nm is None:
+            continue
+        d = t.get("date")
+        if not isinstance(d, dt.date):
+            continue
+        per_card[src].append({
+            "date": d, "n": nm[0], "m": nm[1], "amount": t["amount"],
+            "currency": t.get("currency"), "category": t.get("category"),
+            "source": t.get("source"), "description": t.get("description"),
+        })
+
+    items: list = []
+    for src, charges in per_card.items():
+        cycles = cards.get(src) or []
+        for p in _latest_statement_charges(charges, cycles, today):
+            n, m = p["n"], p["m"]
+            if n >= m:
+                continue                 # last parcela already billed → nothing left
+            cat, cur, psrc = p["category"], p["currency"], p["source"]
+            if category and cat != category:
+                continue
+            if account and account != psrc:
+                continue
+            if currency and cur != currency:
+                continue
+            remaining = m - n
+            ci = _cycle_index(p["date"], cycles)
+            for k in range(1, remaining + 1):
+                flag = None
+                if ci is not None and ci + k < len(cycles):
+                    d = cycles[ci + k].close
+                elif ci is not None and cycles:
+                    over = (ci + k) - (len(cycles) - 1)
+                    last = cycles[-1].close
+                    d = _add_months(last.year, last.month, last.day, over)
+                    flag = "cycle_projected"
+                else:
+                    d = _add_months(p["date"].year, p["date"].month, p["date"].day, k)
+                    flag = "cycle_projected"
+                if not (start <= d <= end):
+                    continue
+                item = {
+                    "date": d.isoformat(), "title": _clean_title(p["description"]),
+                    "type": "withdrawal", "amount": p["amount"], "currency": cur,
+                    "source": psrc, "destination": None, "category": cat,
+                    "status": "upcoming", "matched_txn_id": None, "mechanism": "fatura",
+                    "remaining": remaining, "installment_no": n + k,
+                    "installment_total": m,
+                }
+                if flag:
+                    item["flags"] = [flag]
+                items.append(item)
+    return items
+
+
 def build_projection(granularity: str = "month",
                      start: Optional[dt.date] = None,
                      end: Optional[dt.date] = None,
@@ -577,6 +771,19 @@ def build_projection(granularity: str = "month",
         occ_dates = _occurrences(a, start, end)
         if not occ_dates:
             continue
+        # Installment position "N/T": T = the finite series length; N = this
+        # occurrence's 1-based place in the FULL series (from first_date, NOT the
+        # window). Open-ended recurrences carry neither. Regenerating the whole
+        # series (bounded by nr_of_repetitions) and indexing it keeps N aligned
+        # with the same clamp/skip rules the occurrences themselves use.
+        inst_total = a.get("nr_of_repetitions")
+        inst_total = int(inst_total) if inst_total is not None else None
+        inst_pos: dict = {}
+        if inst_total is not None:
+            first_d = _parse_date(a.get("first_date"))
+            if first_d:
+                inst_pos = {d: i + 1
+                            for i, d in enumerate(_occurrences(a, first_d, _FAR_HORIZON))}
         for tx in a.get("transactions", []):
             src = tx.get("source_name")
             dst = tx.get("destination_name")
@@ -599,6 +806,12 @@ def build_projection(granularity: str = "month",
 
             occ_sorted = sorted(occ_dates)
             is_card = _norm(src) in cards and rtype == "withdrawal"
+            if is_card and inst_total is not None:
+                # Finite card installment: forecast from the booked charges instead
+                # (see _card_installments), the single source of truth. Emitting it
+                # here too — on a different day, in a different billing cycle — is the
+                # double-count this design removes. Skip; do not settle, do not emit.
+                continue
             filled: dict = {}          # occurrence date → the txn that settles it
             acked: set = set()         # occurrence dates acknowledged as unpaid
             occ_flags: dict = defaultdict(list)  # per-occurrence flags
@@ -677,10 +890,19 @@ def build_projection(granularity: str = "month",
                     "destination": dst, "category": cat, "status": status,
                     "matched_txn_id": matched_id, "mechanism": mechanism,
                     "remaining": remaining,
+                    "installment_no": inst_pos.get(d),
+                    "installment_total": inst_total,
                 }
                 if occ_flags.get(d):
                     item["flags"] = list(occ_flags[d])
                 items.append(item)
+
+    # Card installments are NOT forecast from recurrences (those were skipped above);
+    # they are derived from the booked charges themselves — the single source of truth
+    # — so a charge already in the ledger is never also projected. This is what fixes
+    # the current-month double-count.
+    items += _card_installments(txns, cards, today, start, end,
+                                type_filter, category, account, currency)
 
     # aggregate
     periods: dict[str, dict] = {}
@@ -712,8 +934,12 @@ def build_projection(granularity: str = "month",
         cur_summary[c] = {"out": v.get("out", 0.0), "in": v.get("in", 0.0),
                           "net": v.get("in", 0.0) - v.get("out", 0.0)}
 
-    # Per-card cycle ledger: what was settled, by which payment, and how the
-    # recurring charges cleared compare with the fatura's own total.
+    # Per-card cycle ledger: what was settled, by which payment, and how the recurring
+    # charges cleared compare with the fatura's own total. NOTE: `recurring_cleared` (and
+    # therefore `unreconciled`) count only RECURRENCE-cleared charges — open-ended card
+    # subscriptions. Finite installments are booked real charges (derived, not
+    # recurrence-settled), reconciled directly in Firefly III, so they are NOT in this
+    # figure: on an installment-heavy fatura `unreconciled` is expected to be large.
     card_summary = []
     for name, cycles in sorted(cards.items()):
         settled = _settled_cycles(cycles, hist_settle.get(name, []))

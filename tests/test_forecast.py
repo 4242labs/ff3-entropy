@@ -1,7 +1,10 @@
-"""Forecast engine — occurrence computation (bounded by nr_of_repetitions) + paid
-status by ACCOUNT not amount: Mechanism A ordered-fill (dedicated accounts) and
-Mechanism B fatura-driven clearing (credit-card installments). The engine emits the
-OUTSTANDING set only (confirmed occurrences already live in Firefly III)."""
+"""Forecast engine — occurrence computation + paid status, never guessed:
+  • Mechanism A — non-card commitments settled by an explicit `settles:<slug>:<M>` tag.
+  • Mechanism B — credit-card installments DERIVED FROM THE BOOKED CHARGES (the single
+    source of truth): read the latest parcela of each active plan, project only the
+    unbilled tail. Open-ended card charges (subscriptions, no finite N) are still
+    recurrences and still clear against a paid billing cycle.
+The engine emits the OUTSTANDING set only (confirmed occurrences already live in FF3)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -58,6 +61,25 @@ def _settlement(txn_id, date, card, desc="Pagamento fatura", src="Itau"):
     return {"id": txn_id, "type": "transfer", "date": dt.date.fromisoformat(date),
             "amount": 100.0, "currency": "BRL", "source": src,
             "destination": card, "description": desc, "tags": []}
+
+
+def _sub(title, moment, amount, card, first, cur="BRL"):
+    """An OPEN-ENDED card subscription (no nr_of_repetitions): a monthly charge on a
+    card that clears against its paid billing cycle (Mechanism B). Unlike a finite
+    installment — which is now derived from the booked charges, not a recurrence."""
+    return _rec(title, "withdrawal", moment, amount, card, "", first, cur=cur)
+
+
+def _charge(date, n, m, amount=300.0, card="Itaucard", desc=None, tags=(),
+            cur="BRL", cat=None, tid=None):
+    """A REAL booked installment charge on a card — the source of truth the derived
+    forecast reads. Carries `installment N/M` in its description (the issuer's own
+    text) unless a `tags`/`desc` override is given."""
+    body = desc if desc is not None else f"STORE (installment {n}/{m})"
+    return {"id": tid or f"c{n}-{int(amount)}", "type": "withdrawal",
+            "date": dt.date.fromisoformat(date), "amount": amount, "currency": cur,
+            "source": card, "destination": "Store", "category": cat,
+            "description": body, "tags": list(tags)}
 
 
 def _outstanding(res):
@@ -354,27 +376,6 @@ def test_verdict_is_window_independent(monkeypatch):
         assert narrow[k]["status"] == wide[k]["status"]     # diff == ∅
 
 
-def test_card_recurrence_ignores_a_stray_settles_tag(monkeypatch):
-    """Mechanism-B isolation, enforced by construction: a `settles:` tag on a card
-    installment is never consulted — the tag path does not run for a card recurrence.
-    Only the cycle settles it."""
-    today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15",
-                 nr=2, notes="cmt:parc")]
-    # a stray tag that WOULD clear June if the tag path (wrongly) ran for a card
-    txns = [{"id": "stray", "type": "withdrawal", "date": dt.date(2026, 6, 15),
-             "amount": 300.0, "currency": "BRL", "source": "Itaucard",
-             "destination": "Store", "description": "x",
-             "tags": ["settles:parc:2026-06"]}]
-    cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
-    _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
-    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
-                             end=dt.date(2026, 8, 31), today=today)
-    out = _outstanding(res)
-    assert out["2026-06-15"]["mechanism"] == "fatura"       # B, not tag
-    assert out["2026-06-15"]["status"] == "needs_review"    # tag ignored, cycle unpaid
-
-
 def test_double_settle_is_flagged_not_silently_cleared(monkeypatch):
     """Use case 11 (overpayment / duplicate). Two DIFFERENT transactions both tag the
     same month → the engine refuses to pick a winner: `settled_conflict`, left open,
@@ -440,14 +441,38 @@ def test_remaining_counts_tagged_months_for_finite_non_card_series(monkeypatch):
     assert out["2026-07-10"]["remaining"] == 1              # 3 − 2 tagged
 
 
+# ---------- Mechanism B (a): open-ended card subscriptions clear against a cycle ----------
+# A subscription is a card charge with NO finite N: still a recurrence, still settled
+# by its paid billing cycle. The cycle machinery below serves these (finite
+# installments are covered separately, derived from the booked charges).
+
+def test_open_card_sub_ignores_a_stray_settles_tag(monkeypatch):
+    """Mechanism-B isolation, by construction: a `settles:` tag on a card charge is
+    never consulted — the tag path does not run for a card recurrence. Only the cycle
+    settles it."""
+    today = dt.date(2026, 7, 21)
+    recs = [_sub("Netflix", 15, 300, "Itaucard", "2026-06-15")]
+    # a stray tag that WOULD clear June if the tag path (wrongly) ran for a card
+    txns = [{"id": "stray", "type": "withdrawal", "date": dt.date(2026, 6, 15),
+             "amount": 300.0, "currency": "BRL", "source": "Itaucard",
+             "destination": "Store", "description": "x",
+             "tags": ["settles:netflix:2026-06"]}]
+    cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
+    _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 8, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-06-15"]["mechanism"] == "fatura"       # B, not tag
+    assert out["2026-06-15"]["status"] == "needs_review"    # tag ignored, cycle unpaid
+
+
 def test_card_verdict_holds_under_bound_honoring_fetch(monkeypatch):
-    """Mechanism-B regression guard: the widened full-history fetch (now ceilinged at
-    `today`, not the display `end`) must not corrupt the card path. Here the display
-    window ENDS 30/06 but the June-charge's fatura is paid late on 20/07 — the engine
-    must fetch past `end` to `today` and clear it, exactly as window-independence for
-    A does. Uses the bound-honoring stub, so a display-window fetch would fail this."""
+    """Mechanism-B regression guard: the widened full-history fetch (ceilinged at
+    `today`, not the display `end`) must not corrupt the card path. The display window
+    ENDS 30/06 but the June-charge's fatura is paid late on 20/07 — the engine must
+    fetch past `end` to `today` and clear it. Uses the bound-honoring stub."""
     today = dt.date(2026, 7, 25)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=2)]
+    recs = [_sub("Netflix", 15, 300, "Itaucard", "2026-06-15")]
     cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
     txns = [_settlement("late", "2026-07-20", "Itaucard")]
     _wire_ranged(monkeypatch, recs, txns, cards={"Itaucard": cycles})
@@ -457,20 +482,19 @@ def test_card_verdict_holds_under_bound_honoring_fetch(monkeypatch):
 
 
 def test_fatura_clears_the_cycle_a_charge_fell_in(monkeypatch):
-    """A charge on the 9th belongs to the fatura closing on the 12th, which is paid on
-    the 20th. Feb–Apr paid → dropped; May open; the count stops at N=4."""
+    """A charge on the 9th belongs to the fatura closing on the 12th, paid on the
+    20th. Feb–Apr paid → dropped; May open. (Open-ended sub; window bounds the tail.)"""
     today = dt.date(2026, 7, 12)
-    recs = [_rec("AMZ (parc)", "withdrawal", 9, 300, "Itaucard", "", "2026-02-09", nr=4)]
+    recs = [_sub("Spotify", 9, 300, "Itaucard", "2026-02-09")]
     txns = [_settlement(f"s{m}", f"2026-{m:02d}-20", "Itaucard") for m in (2, 3, 4)]
     cycles = _monthly_cycles(2026, range(1, 13), 12, 20)
     _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
-    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
-                             end=dt.date(2026, 12, 31), today=today)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 2, 1),
+                             end=dt.date(2026, 5, 31), today=today)
     out = _outstanding(res)
     assert set(out) == {"2026-05-09"}
     assert out["2026-05-09"]["status"] == "needs_review"
     assert out["2026-05-09"]["mechanism"] == "fatura"
-    assert out["2026-05-09"]["remaining"] == 1
 
 
 def test_late_payment_clears_the_cycle_it_belongs_to(monkeypatch):
@@ -478,7 +502,7 @@ def test_late_payment_clears_the_cycle_it_belongs_to(monkeypatch):
     late on 20/07 clears the JUNE-dated charge — not the July one, which belongs to
     the cycle closing 02/08 and is not yet paid."""
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=3)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-06-15")]
     cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"),
                      ("2026-08-02", "2026-08-09"), ("2026-09-02", "2026-09-09"))
     txns = [_settlement("jul", "2026-07-20", "Itaucard")]
@@ -494,7 +518,7 @@ def test_minimum_alongside_full_payment_clears_one_cycle(monkeypatch):
     """A minimum paid on the 17th and the full fatura on the 20th are two settlements
     but one cycle: the next has not closed, so the surplus clears nothing."""
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=3)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-06-15")]
     cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"),
                      ("2026-08-02", "2026-08-09"))
     txns = [_settlement("min", "2026-07-17", "Itaucard", desc="Pagamento mínimo"),
@@ -511,7 +535,7 @@ def test_skipped_cycle_is_not_cleared_by_a_later_payment(monkeypatch):
     """June's fatura was never paid; July's was paid on time. June must stay open —
     an on-time payment cannot silently absorb the cycle before it."""
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-05-15", nr=3)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-05-15")]
     cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"),
                      ("2026-08-02", "2026-08-09"))
     txns = [_settlement("jul", "2026-07-09", "Itaucard")]
@@ -526,7 +550,7 @@ def test_skipped_cycle_is_not_cleared_by_a_later_payment(monkeypatch):
 def test_no_cycle_rows_clears_nothing_and_flags(monkeypatch):
     """Cycles unknown → the engine refuses to attribute, and says so."""
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=2)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-06-15")]
     txns = [_settlement("jul", "2026-07-20", "Itaucard")]
     _wire(monkeypatch, recs, txns, cards={"Itaucard": []})
     res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
@@ -540,7 +564,7 @@ def test_no_cycle_rows_clears_nothing_and_flags(monkeypatch):
 def test_charge_beyond_the_cycle_table_is_never_assumed(monkeypatch):
     """A charge later than the last known closing date has no cycle → not cleared."""
     today = dt.date(2026, 9, 30)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=4)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-06-15")]
     cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"))
     txns = [_settlement("jun", "2026-06-09", "Itaucard"),
             _settlement("jul", "2026-07-09", "Itaucard")]
@@ -554,7 +578,7 @@ def test_charge_beyond_the_cycle_table_is_never_assumed(monkeypatch):
 
 def test_reversal_is_not_a_settlement(monkeypatch):
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=2)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-06-15")]
     cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
     txns = [_settlement("e", "2026-07-20", "Itaucard", desc="Estorno pagamento fatura")]
     _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
@@ -567,12 +591,12 @@ def test_cycle_summary_reconciles_against_the_fatura_total(monkeypatch):
     """The fatura says what it totalled; the engine reports what it cleared against it,
     so an over- or under-clear is visible even though confirmed items are dropped."""
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 15, 300, "Itaucard", "", "2026-06-15", nr=1)]
+    recs = [_sub("Spotify", 15, 300, "Itaucard", "2026-06-15")]
     cycles = [f.Cycle(dt.date(2026, 7, 2), dt.date(2026, 7, 9), 1000.0)]
     txns = [_settlement("jul", "2026-07-20", "Itaucard")]
     _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
     res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
-                             end=dt.date(2026, 8, 31), today=today)
+                             end=dt.date(2026, 6, 30), today=today)
     row = res["meta"]["cards"][0]["cycles"][0]
     assert row["settled_by"] == "jul"
     assert row["recurring_cleared"] == 300.0
@@ -592,16 +616,16 @@ def test_parse_cycles_reads_notes_and_ignores_rubbish():
 
 
 def test_non_fatura_transfer_does_not_clear(monkeypatch):
-    """A transfer that is NOT into the card must not clear an installment month."""
+    """A transfer that is NOT into the card must not clear a charge's cycle."""
     today = dt.date(2026, 7, 12)
-    recs = [_rec("AMZ (parc)", "withdrawal", 9, 300, "Itaucard", "", "2026-06-09", nr=1)]
+    recs = [_sub("Spotify", 9, 300, "Itaucard", "2026-06-09")]
     txns = [{"id": "x", "type": "transfer", "date": dt.date(2026, 6, 8),
              "amount": 9.0, "currency": "BRL", "source": "Itaucard",
              "destination": "Savings", "description": "not a fatura", "tags": []}]
     _wire(monkeypatch, recs, txns,
           cards={"Itaucard": _monthly_cycles(2026, range(1, 13), 2, 9)})
-    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
-                             end=dt.date(2026, 12, 31), today=today)
+    res = f.build_projection(granularity="month", start=dt.date(2026, 6, 1),
+                             end=dt.date(2026, 6, 30), today=today)
     out = _outstanding(res)
     assert out["2026-06-09"]["status"] == "needs_review"   # still open
 
@@ -610,7 +634,7 @@ def test_first_cycle_does_not_swallow_older_charges(monkeypatch):
     """The earliest row opens where the spacing to the next says it does. A charge
     from before that is not in it, and paying that fatura must not clear it."""
     today = dt.date(2026, 7, 21)
-    recs = [_rec("Parc", "withdrawal", 9, 300, "Itaucard", "", "2026-04-09", nr=4)]
+    recs = [_sub("Spotify", 9, 300, "Itaucard", "2026-04-09")]
     cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"))
     txns = [_settlement("jun", "2026-06-09", "Itaucard")]
     _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
@@ -626,7 +650,7 @@ def test_cycle_unknown_is_per_occurrence_not_per_series(monkeypatch):
     """A series running past the end of the table must not cast doubt on the months
     the table does cover."""
     today = dt.date(2026, 9, 30)
-    recs = [_rec("Parc", "withdrawal", 20, 300, "Itaucard", "", "2026-06-20", nr=4)]
+    recs = [_sub("Spotify", 20, 300, "Itaucard", "2026-06-20")]
     cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"))
     txns = []
     _wire(monkeypatch, recs, txns, cards={"Itaucard": cycles})
@@ -635,3 +659,227 @@ def test_cycle_unknown_is_per_occurrence_not_per_series(monkeypatch):
     out = _outstanding(res)
     assert out["2026-06-20"].get("flags") is None            # covered by the table
     assert out["2026-08-20"]["flags"] == ["cycle_unknown"]   # beyond it
+
+
+# ---------- Mechanism B (b): finite installments DERIVED FROM THE BOOKED CHARGES ----------
+# The single source of truth. Read the latest parcela of each active plan off the last
+# closed statement (plus brand-new plans off the open one); project only the UNBILLED
+# tail N+1..M. A charge already in the ledger is never also projected, so the current
+# month can never be double-counted — the bug this whole mechanism exists to kill.
+
+def _cyc4():
+    """Itaú-style monthly cycles closing on the 2nd, Jun–Sep 2026, due on the 9th."""
+    return _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"),
+                   ("2026-08-02", "2026-08-09"), ("2026-09-02", "2026-09-09"))
+
+
+def test_derived_installment_projects_only_the_unbilled_tail(monkeypatch):
+    """A `10/12` booked in the last closed statement projects 11 and 12 only — never
+    10 (already in the ledger). This is the fix for the current-month double-count."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 10, 12, amount=299.87)]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    out = _outstanding(res)
+    assert set(out) == {"2026-08-02", "2026-09-02"}          # 11/12, 12/12 — not 10
+    assert out["2026-08-02"]["installment_no"] == 11
+    assert out["2026-08-02"]["installment_total"] == 12
+    assert out["2026-09-02"]["installment_no"] == 12
+    assert out["2026-08-02"]["remaining"] == 2
+    assert out["2026-08-02"]["mechanism"] == "fatura"
+    assert out["2026-08-02"]["status"] == "upcoming"
+
+
+def test_completed_plan_projects_nothing(monkeypatch):
+    """The last parcela (12/12) is already billed → the plan is done → no forecast."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 12, 12, amount=406.74)]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    assert _outstanding(res) == {}
+
+
+def test_installment_total_comes_from_the_tag_when_present(monkeypatch):
+    """The `installment:<total>:<current>` tag wins over the description text."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 0, 0, amount=299.87, desc="DELL COMPUTER",
+                       tags=["installment:12:10"])]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    out = _outstanding(res)
+    assert set(out) == {"2026-08-02", "2026-09-02"}
+    assert out["2026-08-02"]["installment_no"] == 11
+    assert out["2026-08-02"]["installment_total"] == 12
+    assert out["2026-08-02"]["title"] == "DELL COMPUTER"
+
+
+def test_three_identical_plans_stay_distinct(monkeypatch):
+    """Three identical `8/12` charges are three plans, not one — multiplicity is
+    preserved (the description can't tell them apart, so we never collapse them)."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 8, 12, amount=368.90, tid=f"m{i}") for i in range(3)]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    items = [it for per in res["periods"] for it in per["items"]]
+    # each plan projects 9,10,11,12 → 3 plans × 4 = 12 rows; two per projected month
+    assert len(items) == 12
+    aug = [it for it in items if it["date"] == "2026-08-02"]
+    assert len(aug) == 3 and all(it["installment_no"] == 9 for it in aug)
+
+
+def test_brand_new_plan_billed_into_the_last_statement_is_projected(monkeypatch):
+    """A `1/12` whose first charge is on the last CLOSED statement projects 2..12 — a
+    new plan is caught as soon as it appears on a statement."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 1, 12, amount=200.0)]     # on the last close (02/07)
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-08-02"]["installment_no"] == 2
+    assert out["2026-08-02"]["installment_total"] == 12
+    assert out["2026-08-02"]["remaining"] == 11
+
+
+def test_open_cycle_purchase_is_deferred_one_statement(monkeypatch):
+    """A plan purchased in the still-open cycle (after the last close) is NOT yet
+    projected — the engine forecasts from statements, and this one hasn't closed. Honest
+    ≤1-cycle lag, never a fabricated plan."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-10", 1, 12, amount=200.0)]     # after last close (02/07)
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    assert _outstanding(res) == {}
+
+
+def test_consecutive_parcelas_take_the_latest_never_double_count(monkeypatch):
+    """The same plan across two CLOSED statements (N, then N+1) projects only from its
+    latest parcela — the earlier statement is never read, so the booked N+1 is never
+    also projected. Holds even when the parcela AMOUNT differs (interest / last-parcela
+    rounding), because nothing is matched by amount."""
+    today = dt.date(2026, 8, 5)
+    charges = [_charge("2026-07-02", 8, 12, amount=300.00, tid="a"),   # prior statement
+               _charge("2026-08-02", 9, 12, amount=290.00, tid="b")]   # last statement
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    nos = sorted(it["installment_no"] for per in res["periods"] for it in per["items"])
+    assert nos == [10, 11, 12]                                # from 9, once — never 9 again
+
+
+def test_varying_amount_completed_plan_projects_nothing(monkeypatch):
+    """A sem-juros plan whose final parcela carries the rounding remainder (a cent more)
+    is still recognised complete once that parcela is booked — no amount match involved,
+    so the earlier parcela can't resurrect the tail."""
+    today = dt.date(2026, 8, 5)
+    charges = [_charge("2026-07-02", 2, 3, amount=333.33, tid="a"),    # prior statement
+               _charge("2026-08-02", 3, 3, amount=333.34, tid="b")]    # last statement, N=M
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    assert _outstanding(res) == {}                            # plan done — nothing
+
+
+def test_two_distinct_equal_amount_plans_on_one_statement_both_survive(monkeypatch):
+    """Two DIFFERENT purchases of the same value, at parcelas N and N+1, billed on the
+    SAME statement are two plans — both tails are projected. They are never collapsed:
+    charges from one statement are never deduped against each other."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 8, 12, amount=250.0, tid="a"),
+               _charge("2026-07-02", 9, 12, amount=250.0, tid="b")]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    nos = sorted(it["installment_no"] for per in res["periods"] for it in per["items"])
+    assert nos == [9, 10, 10, 11, 11, 12, 12]                 # tails of 8/12 AND 9/12
+
+
+def test_newest_cycle_row_missing_does_not_double_count(monkeypatch):
+    """The lag case: the newest statement's charges are booked (parcela 9) before its
+    cycle row is ingested (table ends at the prior close). The booked 9 must NOT be
+    re-projected on top of the prior statement's 8 — only 10,11,12 project, once."""
+    today = dt.date(2026, 8, 10)
+    cycles = _cycles(("2026-06-02", "2026-06-09"), ("2026-07-02", "2026-07-09"))  # no Aug row
+    charges = [_charge("2026-07-02", 8, 12, amount=300.0, tid="a"),   # prior statement
+               _charge("2026-08-02", 9, 12, amount=300.0, tid="b")]   # newest, row not ingested
+    _wire(monkeypatch, [], charges, cards={"Itaucard": cycles})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    nos = sorted(it["installment_no"] for per in res["periods"] for it in per["items"])
+    assert nos == [10, 11, 12]                                # from 9, once — never 9 again
+
+
+def test_un_ingested_last_statement_falls_back_not_blank(monkeypatch):
+    """If the most recent statement hasn't been booked yet, the forecast falls back to
+    the last statement that WAS booked rather than showing the plan as gone."""
+    today = dt.date(2026, 7, 21)
+    # cycles know about the 02/07 statement, but only the 02/06 charge is booked
+    charges = [_charge("2026-06-02", 5, 12, amount=120.0)]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    out = _outstanding(res)
+    assert out                                                # not blank — plan survives
+    assert min(it["installment_no"] for it in out.values()) == 6  # projects 6..12
+
+
+def test_tail_beyond_the_cycle_table_is_flagged_not_faked(monkeypatch):
+    """Past the last issued statement the exact close date is unknown: the tail falls
+    monthly and carries `cycle_projected`, never a fabricated statement date."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 10, 12, amount=299.87)]
+    cycles = _cycles(("2026-07-02", "2026-07-09"), ("2026-08-02", "2026-08-09"))
+    _wire(monkeypatch, [], charges, cards={"Itaucard": cycles})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-08-02"].get("flags") is None             # 11/12 — cycle known
+    assert out["2026-09-02"]["flags"] == ["cycle_projected"]  # 12/12 — past the table
+
+
+def test_card_charge_without_a_marker_is_never_projected(monkeypatch):
+    """An ordinary one-off card charge (no installment marker) yields no forecast —
+    the engine never invents a plan."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 0, 0, desc="GROCERIES", amount=88.0)]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    assert _outstanding(res) == {}
+
+
+def test_installment_of_rejects_garbled_markers():
+    """A marker with an out-of-range parcela is ignored, not force-fit."""
+    assert f._installment_of({"description": "STORE (installment 10/12)", "tags": []}) == (10, 12)
+    assert f._installment_of({"description": "STORE (Parcela 3/3)", "tags": []}) == (3, 3)
+    assert f._installment_of({"description": "x", "tags": ["installment:12:10"]}) == (10, 12)
+    assert f._installment_of({"description": "STORE (installment 13/12)", "tags": []}) is None
+    assert f._installment_of({"description": "no marker here", "tags": []}) is None
+
+
+def test_installment_category_flows_from_the_booked_charge(monkeypatch):
+    """The projected rows carry the booked charge's own category — read, not guessed."""
+    today = dt.date(2026, 7, 21)
+    charges = [_charge("2026-07-02", 10, 12, amount=299.87, cat="Health")]
+    _wire(monkeypatch, [], charges, cards={"Itaucard": _cyc4()})
+    res = f.build_projection(granularity="month", start=dt.date(2026, 1, 1),
+                             end=dt.date(2026, 12, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-08-02"]["category"] == "Health"
+
+
+def test_open_ended_recurrence_has_no_installment_number(monkeypatch):
+    """An open-ended commitment (no nr_of_repetitions) carries neither N nor T."""
+    today = dt.date(2026, 7, 12)
+    recs = [_rec("Rent", "withdrawal", 5, 1000, "Bank", "LL", "2026-01-05", notes="cmt:rent")]
+    _wire(monkeypatch, recs, [])
+    res = f.build_projection(granularity="month", start=dt.date(2026, 7, 1),
+                             end=dt.date(2026, 7, 31), today=today)
+    out = _outstanding(res)
+    assert out["2026-07-05"]["installment_no"] is None
+    assert out["2026-07-05"]["installment_total"] is None

@@ -33,11 +33,31 @@ restate it.
 guesses. It marks an occurrence paid by the **account that paid it, not the
 amount** — so a bill whose amount drifts, or that you paid late or in the next
 month, still counts; each real payment clears the earliest still-open occurrence.
-Credit-card installments have no payment of their own — they clear when the card
-bill (fatura) they were charged to is settled. If nothing accounts for an
-occurrence once its date has passed it says so, and if a payment can't be
-attributed cleanly (a shared or noisy account) it flags it — instead of
-pretending either way.
+If nothing accounts for an occurrence once its date has passed it says so, and if
+a payment can't be attributed cleanly (a shared or noisy account) it flags it —
+instead of pretending either way.
+
+### Credit-card installments (parcelado)
+
+An installment lives in Firefly III the moment it is charged: a real card
+withdrawal, dated on the statement, carrying its own parcela number (`installment
+N/M` in the description, or an `installment:<total>:<current>` tag). Entropy keeps
+**no parallel forecast object** for it — that second copy fired on a different day,
+fell into a different billing cycle, and double-counted the current month. Instead
+the forecast is a pure function of the booked charges: it reads the **latest
+parcela of each active plan** (off the last closed statement, plus brand-new plans
+off the still-open one) and projects only the **unbilled tail**, parcelas `N+1 … M`,
+onto the coming statement dates. A charge already in the ledger is never also
+projected, so an installment can never be counted twice.
+
+Nothing is inferred. The total `M` and number `N` come from the charge itself; a
+charge that states no installment is an ordinary one-off and is never projected, and
+a plan whose total is unknown projects nothing. Concurrent identical plans stay
+distinct (three `8/12` charges are three plans). Past the last issued statement the
+exact date isn't known, so the tail falls monthly and is flagged `cycle_projected`.
+
+Open-ended card charges — a subscription with no finite `N` — are the exception:
+they *are* recurrences, and they still clear against the paid billing cycle below.
 
 ### Card billing cycles
 
